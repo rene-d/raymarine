@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Déclarations iOS fusionnées par Tauri dans le Info.plist du projet Xcode.
+  Elles vivent ici et non dans `gen/apple/`, qui se régénère.
+
+  Sans elles, la découverte ne rend jamais rien — et sans la moindre erreur :
+
+  - NSBonjourServices : iOS filtre silencieusement toute recherche portant sur
+    un type de service non déclaré. À tenir en phase avec `SERVICES` dans
+    `src/discovery/apple.rs`.
+  - NSLocalNetworkUsageDescription : le texte du dialogue « Réseau local ».
+    L'autorisation couvre la recherche Bonjour *et* la connexion TCP vers le
+    MFD, toutes deux impossibles si l'utilisateur refuse.
+
+  Aucun entitlement multicast ici : c'est le démon Bonjour du système qui fait
+  le multicast, l'application n'ouvre pas de socket 224.0.0.251.
+-->
+<plist version="1.0">
+<dict>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>MFDView cherche le traceur Raymarine sur le réseau Wi-Fi du bord.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_raydb._tcp</string>
+    <string>_rym_rrc._tcp</string>
+  </array>
+</dict>
+</plist>

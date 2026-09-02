@@ -1,0 +1,60 @@
+# MFD Raymarine simulé.
+#
+# DEUX modes, exclusifs, chacun sous son profil — n'en lancer qu'UN à la fois
+# (les deux ensemble se disputent les mêmes ports) :
+#
+#   docker compose --profile host   up      # Linux : réseau host, découverte OK
+#   docker compose --profile bridge up      # macOS/Windows : mappage de ports
+#
+# Mode « host » (network_mode: host) : le beacon multicast 5800 et l'annonce
+# mDNS ne franchissent pas le pont NAT de Docker, il faut donc le réseau host.
+# Sous Linux c'est natif ; sous macOS/Windows, Docker Desktop tourne dans une VM,
+# donc « host » désigne cette VM et le multicast n'atteint pas le réseau du Mac
+# (voir README, « Limites ») — d'où le mode bridge, sans découverte.
+#
+# Un « docker compose up » nu ne démarre rien (aucun profil actif) : c'est voulu,
+# pour forcer le choix du mode.
+services:
+  mfd:
+    build: .
+    container_name: raymarine-mfd
+    profiles: ["host"]
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      MFD_MODEL: E70363
+      MFD_SERIAL: "1234567"
+      MFD_PRODUCT: AXIOM 7
+      MFD_FIRMWARE: 4.11.13
+      MFD_SSH_USER: media_rw
+      MFD_SSH_PASSWORD: media_rw
+      # MFD_IP: 192.168.111.1          # sinon auto-détection
+      # MFD_AUTHORIZED_KEY: "ssh-rsa AAAA…"
+    # Aucune commande : le sshd Python (paramiko) sert le port 22, comme les
+    # autres services. Plus de sshd système dans l'image.
+    volumes:
+      # Fige la clé d'hôte du sshd Python (MFD_SSH_HOST_KEY=/etc/ssh/keys/… dans
+      # le Dockerfile) : sans ce volume, l'empreinte change à chaque recréation
+      # du conteneur et les clients refusent la connexion.
+      - mfd-sshkeys:/etc/ssh/keys
+
+  # Variante sans multicast, quand --network host n'est pas disponible :
+  # les ports unicast (SSH, RayDB, RRCE, RTSP) restent joignables, la découverte
+  # non. Le RTSP sur TCP passe bien le bridge (contrairement au multicast).
+  # Lancer avec :  docker compose --profile bridge up mfd-bridge
+  mfd-bridge:
+    build: .
+    container_name: raymarine-mfd-bridge
+    profiles: ["bridge"]
+    restart: unless-stopped
+    ports:
+      - "2222:22"
+      - "23333:23333"
+      - "50000:50000"
+      - "8554:8554"
+      - "8182:8182"
+      - "8088:8088"   # API REST et page de pilotage du simulateur
+    command: ["--no-mdns", "--no-5800"]
+
+volumes:
+  mfd-sshkeys:

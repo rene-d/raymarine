@@ -1,0 +1,58 @@
+[package]
+name = "mfdview"
+version = "0.1.0"
+edition = "2021"
+description = "Instruments RayDB — application native"
+rust-version = "1.77"
+
+# Le travail vit dans une bibliothèque : sur mobile il n'y a pas de `main()`,
+# c'est le projet Xcode (ou Gradle) qui lie ce crate et appelle `run()`.
+# `staticlib` pour iOS, `cdylib` pour Android, `rlib` pour le binaire de bureau.
+[lib]
+name = "mfdview_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde_json = "1"
+
+# La découverte passe par le démon Bonjour du système (`dns_sd.h`, libSystem) :
+# aucune socket multicast ouverte par l'app, donc pas d'entitlement multicast à
+# demander à Apple. `libc` n'est là que pour le `poll()` de `discovery/apple.rs`.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+libc = "0.2"
+
+# Ailleurs, une pile mDNS en Rust pur, qui ouvre sa propre socket multicast.
+[target.'cfg(not(any(target_os = "macos", target_os = "ios")))'.dependencies]
+mdns-sd = "0.20.2"
+
+# Android seul : `WifiManager.MulticastLock`, pris par JNI directe le temps
+# d'une recherche mDNS (voir `discovery/mdns_sd/android.rs`). Tauri sur Android
+# n'initialise pas le global `ndk_context` habituel (ni `wry` ni `tao` ne
+# l'appellent) — on capte le `JavaVM` nous-mêmes dans `JNI_OnLoad`, d'où cette
+# dépendance plutôt que ce crate-là.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
+# La carte est **hors du build par défaut** : `cargo run --features map`, ou
+# `just run-map`. Sans elle, SQLite n'est pas compilé du tout et `map_available`
+# rend `null` — la page n'affiche pas la vignette, les instruments sont intacts.
+[features]
+map = ["dep:rusqlite"]
+
+# La carte (MBTiles = une base SQLite) n'existe que sur macOS : ni iOS ni
+# Android n'hébergeraient les trois gigaoctets du jeu de tuiles. `bundled`
+# compile SQLite avec le crate, plutôt que de dépendre de celui du système —
+# une minute de compilation, d'où le `optional` ci-dessus.
+[target.'cfg(target_os = "macos")'.dependencies]
+rusqlite = { version = "0.40.1", features = ["bundled"], optional = true }
+
+# La compilation de debug est déjà rapide ; on garde le binaire de release petit
+# (l'app embarque une webview système, il n'y a pas de moteur JS à traîner).
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

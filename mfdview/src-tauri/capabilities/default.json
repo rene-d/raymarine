@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Droits de la fenêtre principale. En Tauri v2 la page part sans aucune permission : sans ce fichier, même `event.listen` est refusé et la page ne reçoit jamais les valeurs du MFD.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

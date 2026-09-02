@@ -1,0 +1,46 @@
+# Caches / OS. mypy pose son propre .gitignore dans .mypy_cache/, pas ruff : sans
+# la ligne ci-dessous, .ruff_cache/ ne tient que par un ~/.gitignore_global, donc
+# pas sur un autre clone.
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+
+# Racine (chroot) du serveur SFTP de test — arbre UserData + fichiers déposés.
+# Exception : les marqueurs .gitkeep de `sftp/mnt/`, qui versionnent les points de
+# montage du MFD (cartes SD, USB) sans leur contenu. La négation exige de ne pas
+# exclure les répertoires eux-mêmes, sinon Git n'y descend pas.
+mfdsim/sftp/**
+!mfdsim/sftp/**/
+!mfdsim/sftp/mnt/**/.gitkeep
+
+# Tauri : artefacts de compilation (1,3 Go), et tout `gen/` — schémas JSON du
+# build, projet Xcode iOS (`cargo tauri ios init`) et projet Gradle Android
+# (`cargo tauri android init`), le tout régénérable. Ce qui doit survivre à une
+# régénération vit dans `src-tauri/` : `Info.ios.plist`, `android-postinit-
+# patch.sh`, les icônes, `tauri.conf.json`.
+app/src-tauri/target/
+app/src-tauri/gen/
+
+# Icônes dérivées par `just icons` (Windows, macOS, Android, tailles diverses) :
+# régénérables d'un coup depuis la seule source versionnée, `icon.png`.
+app/src-tauri/icons/*
+!app/src-tauri/icons/icon.png
+!app/src-tauri/icons/no-alpha.py
+
+# Secrets — le JSON Raymarine contient une clé privée SSH (SshPrivateKey)
+ssh/user_settings*.json
+
+# Données binaires volumineuses (captures, firmwares, apps) — hors dépôt
+pcap/
+*.pcap
+*.pcapng
+
+# Jeux de tuiles de la carte (MBTiles) : celui du bord pèse 3 Go. L'app les
+# cherche ici (cf. app/README.md), mais ils ne se versionnent pas.
+app/maps/
+
+# Binaire produit par `go build` dans raynmea/ (le paquet et le binaire portent
+# le même nom, donc le second se glisse dans le répertoire du premier).
+raynmea/raynmea

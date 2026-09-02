@@ -1,0 +1,33 @@
+# Client OpenSSH ancien (7.9p1, Alpine 3.9) pour dialoguer avec le serveur SSH
+# vétuste du MFD Raymarine.
+#
+# Le MFD tourne un OpenSSH < 7.5 (directives
+# RSAAuthentication / Protocol 2 / UsePrivilegeSeparation) : il n'accepte la clé
+# RSA-2048 de RayConnect qu'avec des signatures ssh-rsa (RSA/SHA-1) et ne
+# propose en KEX que des algorithmes SHA-1 hérités. Les OpenSSH récents
+# (>= 8.8, dont celui de macOS) les refusent ou les ont retirés ; ce client
+# ancien les gère nativement.
+#
+# Construction puis usage (depuis la racine du dépôt) :
+#     docker build -f ssh/Dockerfile.client -t rm-ssh-legacy ssh/
+#     ./rm_ssh.py ssh/user_settings_*.json --docker
+#     ./rm_ssh.py ssh/user_settings_*.json --docker --sftp
+#
+# rm_ssh.py monte le *dossier* de la clé privée en lecture seule sur
+# /tmp/rm_keydir (Docker Desktop macOS échoue à monter un fichier seul) ; ssh
+# exige une clé possédée par l'utilisateur courant en mode 0600, d'où sa recopie
+# par l'entrypoint ci-dessous.
+#
+# Réseau : le conteneur atteint 192.168.111.1 via le routage de l'hôte (bridge
+# par défaut). La résolution mDNS « <serial>.local » ne fonctionne pas dans le
+# conteneur : en mode Docker, viser l'adresse IP (--host 192.168.111.1, défaut).
+
+FROM alpine:3.9
+
+RUN apk add --no-cache openssh-client
+
+RUN printf '#!/bin/sh\ncp /tmp/rm_keydir/id /root/rm_key 2>/dev/null && chmod 600 /root/rm_key\nexec "$@"\n' \
+        > /usr/local/bin/rm-entry \
+    && chmod +x /usr/local/bin/rm-entry
+
+ENTRYPOINT ["/usr/local/bin/rm-entry"]

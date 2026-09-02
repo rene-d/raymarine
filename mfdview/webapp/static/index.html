@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MFDView — instruments</title>
+<meta name="theme-color" content="#111110">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="bar">
+  <span id="dot" class="dot" aria-hidden="true"></span>
+  <strong id="boat" class="boat"></strong>
+  <span id="status" class="status">connexion…</span>
+  <span id="clock" class="clock"></span>
+</header>
+
+<main>
+
+  <!-- Rose des vents à rose mobile : la graduation tourne avec le cap vrai (le
+       cap suivi passe sous l'étrave, en haut), les aiguilles gardent leur angle
+       à l'étrave et se lisent donc en absolu sur la graduation. -->
+  <section class="card rose-card" aria-labelledby="rose-title">
+    <h2 id="rose-title" class="sr-only">Vent et route</h2>
+
+    <!-- Les deux caps encadrent la rose : la route sur le fond à gauche, le cap
+         de l'étrave à droite. Leur écart est la dérive, et il se lit sur le
+         dessin — entre la ligne de foi et la demi-droite de route. -->
+    <div class="rose-heads">
+      <div>
+        <p class="caps-label">COG</p>
+        <p><span id="rose-cog" class="num">—</span><span class="unit deg">°</span></p>
+      </div>
+      <div class="right">
+        <p class="caps-label">Cap vrai</p>
+        <p><span id="rose-hdg" class="num">—</span><span class="unit deg">°</span></p>
+      </div>
+    </div>
+
+    <!-- Cadre un peu plus large que la rose (r = 96) : les libellés à 104,
+         redressés, débordaient de trois chiffres sur les flancs. -->
+    <svg class="rose" viewBox="-116 -116 232 232" role="img"
+         aria-label="Rose orientée au cap vrai : axe du bateau, route sur le fond, vent réel et vent apparent, en angles à l'étrave">
+      <g id="ticks" class="ticks"></g>
+      <circle class="rim" cx="0" cy="0" r="96"></circle>
+      <!-- Ligne de foi : l'axe du bateau, du centre à la graduation. Ce qu'elle
+           désigne en haut de la rose est le cap suivi. -->
+      <line class="bow-line" x1="0" y1="0" x2="0" y2="-96"></line>
+      <!-- Route sur le fond, depuis le bateau. Son écart avec la ligne de foi
+           est la dérive — vent et courant. -->
+      <g id="cog-ray" class="ray cog">
+        <line x1="0" y1="0" x2="0" y2="-96"></line>
+      </g>
+      <!-- coque vue de dessus, étrave en haut -->
+      <path class="boat" d="M0,-21.1 C6.2,-12.4 8.1,-1.2 7.4,11.2 L7.4,17.4
+                            L-7.4,17.4 L-7.4,11.2 C-8.1,-1.2 -6.2,-12.4 0,-21.1 Z"></path>
+      <!-- Flèches : elles montrent d'où vient le vent, pointe vers le bateau. -->
+      <g id="twa-needle" class="needle twa">
+        <path d="M0,-66 L-13,-96 L13,-96 Z"></path>
+        <text id="twa-tag" x="0" y="-86">R</text>
+      </g>
+      <g id="awa-needle" class="needle awa">
+        <path d="M0,-36 L-12,-62 L12,-62 Z"></path>
+        <text id="awa-tag" x="0" y="-53">A</text>
+      </g>
+    </svg>
+
+    <dl class="wind-legend">
+      <div class="wind-row twa">
+        <dt><i class="chip" aria-hidden="true"></i>Réel</dt>
+        <dd><span id="twa" class="num">—</span><span class="unit deg">°</span>
+            <span id="twa-side" class="side"></span></dd>
+        <dd><span id="tws" class="num">—</span><span class="unit">nd</span></dd>
+      </div>
+      <div class="wind-row awa">
+        <dt><i class="chip" aria-hidden="true"></i>Apparent</dt>
+        <dd><span id="awa" class="num">—</span><span class="unit deg">°</span>
+            <span id="awa-side" class="side"></span></dd>
+        <dd><span id="aws" class="num">—</span><span class="unit">nd</span></dd>
+      </div>
+    </dl>
+  </section>
+
+  <!-- Route -->
+  <section class="tiles">
+    <div class="card tile">
+      <h2 class="card-title">SOG <span class="hint">vitesse/fond</span></h2>
+      <p><span id="sog" class="num">—</span><span class="unit">nd</span></p>
+      <svg class="spark" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
+        <path id="sog-spark" vector-effect="non-scaling-stroke"></path>
+      </svg>
+      <p class="spark-cap">30 s</p>
+    </div>
+    <div class="card tile">
+      <h2 class="card-title">Sonde <span class="hint">profondeur</span></h2>
+      <p><span id="depth" class="num">—</span><span class="unit">m</span></p>
+      <!-- Échelle inversée, comme un sondeur : la ligne descend quand ça
+           s'approfondit, elle remonte sur les hauts-fonds. -->
+      <svg class="spark" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
+        <path id="depth-spark" vector-effect="non-scaling-stroke"></path>
+      </svg>
+      <p class="spark-cap">30 s</p>
+    </div>
+  </section>
+
+  <!-- Polaire : la vitesse que le bateau devrait tenir dans ce vent-là -->
+  <section class="card polar-card">
+    <h2 class="card-title">Polaire <span id="polar-name" class="hint">aucun fichier</span></h2>
+    <div class="polar-row">
+      <p><span id="target" class="num">—</span><span class="unit">nd</span></p>
+      <!-- Les cases de la table qui ont servi, puis le rendement : de quoi
+           juger la cible avant de s'y fier. -->
+      <div class="polar-read">
+        <p id="polar-range" class="polar-cells"></p>
+        <p id="perf" class="side"></p>
+      </div>
+      <!-- Pas d'attribut `accept` : sur iPhone, une extension inconnue comme
+           .pol se traduit par un type dynamique et le sélecteur de fichiers
+           grise tout le reste. Mieux vaut tout montrer et rejeter à la lecture.
+           Le <label> porte le clic, l'<input> est masqué : c'est la seule façon
+           d'habiller un sélecteur de fichier. Réduit à une icône, il lui faut
+           un nom accessible, que le texte donnait jusqu'ici. -->
+      <div class="polar-actions">
+        <label class="file-btn" title="Charger un fichier de polaires"
+               aria-label="Charger un fichier de polaires">
+          <!-- Une feuille et une flèche qui y entre : importer un fichier. -->
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M4.5,2.5 h7 l4,4 v11 h-11 Z"></path>
+            <path d="M11.5,2.5 v4 h4"></path>
+            <path d="M10,8.5 v5 m-2.5,-2.5 l2.5,2.5 l2.5,-2.5"></path>
+          </svg>
+          <input id="polar-file" class="sr-only" type="file">
+        </label>
+        <!-- Sortie de la polaire relevée des mesures du bord. Éteint tant qu'il
+             n'y a rien à sortir — polaire absente, ou aucun palier mesuré. -->
+        <button id="polar-export" class="file-btn" type="button" disabled
+                title="Exporter la polaire mesurée"
+                aria-label="Exporter la polaire mesurée">
+          <!-- La flèche qui sort de la boîte : le partage, au sens d'iOS. -->
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M10,13 v-11 m-3.5,3.5 l3.5,-3.5 l3.5,3.5"></path>
+            <path d="M4.5,10.5 v7 h11 v-7"></path>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Position -->
+  <section class="card pos-card">
+    <h2 class="card-title">Position <span id="pos-acc" class="hint"></span></h2>
+    <p class="pos"><span id="lat" class="num">—</span></p>
+    <p class="pos"><span id="lon" class="num">—</span></p>
+    <p class="pos-dec"><span id="pos-dec">—</span></p>
+  </section>
+
+  <!-- Vignette de carte, juste sous les coordonnées : révélée par map.js, et
+       seulement s'il y a une carte à montrer (app native sur macOS, jeu de
+       tuiles trouvé). Ailleurs elle reste absente, Leaflet n'est pas chargé. -->
+  <section id="map-card" class="card map-card" hidden>
+    <h2 class="card-title">Carte <span class="hint">SHOM</span></h2>
+    <div class="map-frame">
+      <div id="map"></div>
+      <button type="button" id="recenter" class="recenter on" title="Recentrer sur le bateau">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+          <circle cx="12" cy="12" r="5" />
+          <path d="M12 1v4M12 19v4M1 12h4M19 12h4" />
+        </svg>
+        <span class="sr-only">Recentrer sur le bateau</span>
+      </button>
+    </div>
+  </section>
+
+  <details id="raw-details" class="card raw">
+    <summary>Valeurs brutes RayDB</summary>
+    <table>
+      <thead><tr><th>clé</th><th>valeur (SI)</th><th>âge</th></tr></thead>
+      <tbody id="raw-body"></tbody>
+    </table>
+  </details>
+
+</main>
+
+<script src="map.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
