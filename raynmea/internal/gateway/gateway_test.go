@@ -1,12 +1,15 @@
-package main
+package gateway
 
 import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"math"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -121,13 +124,13 @@ func TestNaNIsNotAValue(t *testing.T) {
 	if _, has := v.Number(); has {
 		t.Error("NaN pris pour une valeur")
 	}
-	if s := newBridge(false).handle(time.Now(), "data/cog", v); len(s) != 0 {
+	if s := newBridge().handle(time.Now(), "data/cog", v); len(s) != 0 {
 		t.Errorf("phrases émises sur un NaN : %v", s)
 	}
 }
 
 func TestSentences(t *testing.T) {
-	b := newBridge(false)
+	b := newBridge()
 	ts := time.Date(2026, 7, 30, 12, 34, 56, 780_000_000, time.UTC)
 
 	// Les chemins en cache n'émettent rien par eux-mêmes.
@@ -330,5 +333,65 @@ func TestMultiEntryTableIsNotTruncated(t *testing.T) {
 	}
 	if v.Fields[4].Name != "Vendor" || v.Fields[4].Value.Int != 1 {
 		t.Errorf("dernière entrée : %+v", v.Fields[4])
+	}
+}
+
+func TestSinkRotates(t *testing.T) {
+	// Le plafond sert une app qui tourne des semaines : au-delà, le fichier est
+	// versé dans « .1 » et repart à zéro, et il n'en reste jamais que deux.
+	path := filepath.Join(t.TempDir(), "suivi.log")
+	s, err := openSink(path, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	for i := range 12 {
+		s.line(fmt.Sprintf("ligne %02d", i)) // 9 octets chacune
+	}
+
+	cur, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cur) >= 40 {
+		t.Errorf("le fichier courant pèse %d octets, le plafond est 40", len(cur))
+	}
+	if !strings.Contains(string(cur), "ligne 11") {
+		t.Errorf("la dernière ligne devrait être dans le fichier courant : %q", cur)
+	}
+	old, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatalf("pas de fichier tourné : %v", err)
+	}
+	// Deux fichiers, pas plus : la deuxième rotation a recouvert la première,
+	// et « .1 » porte donc les lignes qui précèdent immédiatement.
+	if !strings.Contains(string(old), "ligne 09") {
+		t.Errorf("le fichier tourné devrait porter les lignes d'avant : %q", old)
+	}
+	if entries, _ := filepath.Glob(path + "*"); len(entries) != 2 {
+		t.Errorf("%d fichiers, 2 attendus : %v", len(entries), entries)
+	}
+}
+
+func TestSinkWithoutMaxNeverRotates(t *testing.T) {
+	// Le défaut de la ligne de commande : `-log capture.log` garde tout.
+	path := filepath.Join(t.TempDir(), "capture.log")
+	s, err := openSink(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	for i := range 200 {
+		s.line(fmt.Sprintf("ligne %03d", i))
+	}
+	if _, err := os.Stat(path + ".1"); !os.IsNotExist(err) {
+		t.Error("sans plafond, rien ne doit tourner")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(b), "\n"); n != 200 {
+		t.Errorf("%d lignes gardées, 200 attendues", n)
 	}
 }

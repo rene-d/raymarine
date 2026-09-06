@@ -16,7 +16,7 @@
 //
 // Une valeur suit immédiatement son type ; seules les chaînes portent une
 // longueur. Voir § 5.1 de la spec.
-package main
+package gateway
 
 import (
 	"bufio"

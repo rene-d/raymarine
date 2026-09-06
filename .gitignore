@@ -42,5 +42,10 @@ pcap/
 app/maps/
 
 # Binaire produit par `go build` dans raynmea/ (le paquet et le binaire portent
-# le même nom, donc le second se glisse dans le répertoire du premier).
+# le même nom, donc le second se glisse dans le répertoire du premier), et la
+# version croisée pour le Raspberry Pi du bord (`just cross`).
 raynmea/raynmea
+raynmea/raynmea-linux-*
+
+# L'app macOS de la barre de menus, assemblée par `just app`.
+raynmea/raynmea.app/

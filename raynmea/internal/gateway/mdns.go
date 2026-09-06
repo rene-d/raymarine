@@ -14,7 +14,7 @@
 // bateau, où le WiFi du MFD va et vient et où son bail DHCP peut changer, dix
 // secondes de latence ne coûtent rien, et le changement d'adresse force la
 // reconnexion (cf. `client.go`).
-package main
+package gateway
 
 import (
 	"context"

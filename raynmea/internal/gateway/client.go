@@ -5,7 +5,7 @@
 // reconnexion : le MFD ferme, le MFD se tait (deadline de lecture), ou la
 // découverte annonce une autre adresse pour le MFD qu'on suit — c'est ce
 // dernier cas qui rend le bail DHCP inoffensif.
-package main
+package gateway
 
 import (
 	"bufio"
@@ -39,6 +39,8 @@ type event struct {
 	path string
 	val  Value
 	note string
+	// link : changement d'état de la liaison, plutôt qu'une valeur ou une note.
+	link *Link
 	// quiet : note qui ne vaut que dans le fil, et ne doit pas prendre l'en-tête
 	// de la TUI — l'état de la connexion y est plus utile qu'un chemin souscrit
 	// une fois pour toutes.
@@ -68,6 +70,7 @@ func (c *client) run(ctx context.Context) {
 		if ip == "" {
 			if !announced {
 				c.note("attente d'une annonce mDNS du MFD…")
+				c.emit(event{when: time.Now(), link: &Link{}})
 				announced = true
 			}
 			select {
@@ -81,6 +84,9 @@ func (c *client) run(ctx context.Context) {
 		if err := c.session(ctx, ip); err != nil && ctx.Err() == nil {
 			c.note("%s : %v — reconnexion…", ip, err)
 		}
+		// La session est finie, de quelque façon : l'adresse reste celle qu'on
+		// suit, mais plus rien n'y passe.
+		c.emit(event{when: time.Now(), link: &Link{IP: ip}})
 		if ctx.Err() != nil {
 			return
 		}
@@ -109,6 +115,7 @@ func (c *client) session(ctx context.Context, ip string) error {
 		tcp.SetNoDelay(true)
 	}
 	c.note("connecté à %s", addr)
+	c.emit(event{when: time.Now(), link: &Link{IP: ip, Connected: true}})
 
 	// La connexion se ferme aussi de l'extérieur : à l'arrêt, et quand la
 	// découverte donne une autre adresse au MFD — fermer le socket est la façon

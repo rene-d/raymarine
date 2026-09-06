@@ -3,8 +3,8 @@
 // « docs/2. protocole-raydb-23333.md » §NMEA).
 //
 // Unités RayDB (cohérentes avec NMEA 2000 / SeaTalkNG) : angles en **radians**,
-// vitesses en **m/s**, profondeurs et altitudes en **mètres**. Si le MFD envoie
-// en réalité des nœuds, -knots.
+// vitesses en **m/s**, profondeurs et altitudes en **mètres** — c'est ce que les
+// captures montrent, et le pont convertit à partir de là.
 //
 // Chaque phrase a **un** chemin déclencheur, pour éviter les doublons ; les
 // autres chemins ne font qu'alimenter un cache lu à l'émission :
@@ -34,7 +34,7 @@
 // sont des angles **relatifs à l'étrave**, pas des directions référencées au
 // nord (d'où l'ajout du cap pour MWD) ; `data/rot` est en rad/s, converti en
 // degrés/minute pour ROT.
-package main
+package gateway
 
 import (
 	"fmt"
@@ -59,14 +59,13 @@ const (
 )
 
 type bridge struct {
-	knots bool               // true : les vitesses RayDB sont déjà en nœuds
 	gp    string             // talker des phrases de positionnement
 	ii    string             // talker des phrases instruments
 	cache map[string]float64 // chemin → dernière valeur numérique
 }
 
-func newBridge(knots bool) *bridge {
-	return &bridge{knots: knots, gp: "GP", ii: "II", cache: map[string]float64{}}
+func newBridge() *bridge {
+	return &bridge{gp: "GP", ii: "II", cache: map[string]float64{}}
 }
 
 // handle rend les phrases NMEA déclenchées par cet événement RayDB.
@@ -131,19 +130,8 @@ func (b *bridge) get(path string) (float64, bool) {
 	return v, ok && !math.IsNaN(v)
 }
 
-func (b *bridge) kn(v float64) float64 {
-	if b.knots {
-		return v
-	}
-	return v * msToKn
-}
-
-func (b *bridge) ms(v float64) float64 {
-	if b.knots {
-		return v / msToKn
-	}
-	return v
-}
+// kn convertit une vitesse RayDB (m/s) en nœuds, l'unité de NMEA 0183.
+func (b *bridge) kn(v float64) float64 { return v * msToKn }
 
 // variation rend (valeur absolue en degrés, "E"|"W") ou ("", "").
 func (b *bridge) variation() (string, string) {
@@ -222,7 +210,7 @@ func (b *bridge) vw(speed float64, anglePath, kind string) []string {
 		return nil
 	}
 	a, side := angleLR(angle)
-	kn, ms := b.kn(speed), b.ms(speed)
+	kn, ms := b.kn(speed), speed
 	return []string{sentence(b.ii, fmt.Sprintf("%s,%.1f,%s,%.1f,N,%.1f,M,%.1f,K",
 		kind, a, side, kn, ms, ms*msToKmh))}
 }
@@ -239,7 +227,7 @@ func (b *bridge) mwd(speed float64) []string {
 	if v, ok := b.get("data/bearing/variation"); ok {
 		dirM = fmt.Sprintf("%.1f", deg360(angle+hdt-v))
 	}
-	kn, ms := b.kn(speed), b.ms(speed)
+	kn, ms := b.kn(speed), speed
 	return []string{sentence(b.ii, fmt.Sprintf("MWD,%.1f,T,%s,M,%.1f,N,%.1f,M",
 		deg360(angle+hdt), dirM, kn, ms))}
 }
