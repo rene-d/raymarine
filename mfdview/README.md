@@ -39,6 +39,19 @@ fait défiler comme les autres.
 Un bouton en bas à droite recentre. Déplacer la carte à la main coupe le suivi ;
 seul ce bouton le rétablit.
 
+Deux relevés sont posés dessus. En haut à droite, le **niveau de zoom** — suivi
+de « agrandi » au-delà du zoom du jeu, là où Leaflet étire la dernière tuile et
+où le détail affiché n'est plus celui de la carte. En bas, les **coordonnées du
+point survolé** (celles du bateau quand la souris est ailleurs), et avec elles
+la **distance et le relèvement vrai** depuis le bateau — de quoi mesurer sur la
+carte sans quitter la page : « mon mouillage est à 180 m au 045 ».
+
+**⌥-clic copie** le point sous le curseur en degrés décimaux
+(`48.320600, -4.804300`), la forme que recollent les autres outils ; la touche
+`c` fait de même sans la souris, sur le point survolé ou, à défaut, sur le
+bateau. Le bandeau confirme une seconde ce qui est parti. Le clic nu, lui, ne
+fait rien : sur une carte il sert à viser, pas à déclencher.
+
 Sans `MFDVIEW_MBTILES`, l'app prend le premier `*.mbtiles` trouvé dans son
 dossier de données (`~/Library/Application Support/com.mfdview.instruments/`), puis
 dans `maps/` à la racine du dépôt. **Aucun fichier n'est empaqueté** : le jeu

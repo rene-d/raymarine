@@ -113,13 +113,19 @@ function relative(rad) {
   return d > 180 ? { a: 360 - d, side: 'bâbord' } : { a: d, side: 'tribord' };
 }
 
-/** Degrés décimaux → « 43° 17,726′ N » (format usuel des GPS marins). */
-function dm(v, positive, negative, width) {
+/** Degrés décimaux → « 43° 17,726′ N » (format usuel des GPS marins).
+ *
+ * `decimals` monte la précision là où elle se voit : la carte de `map.js` en
+ * demande quatre, parce qu'au zoom maximal un pixel vaut dix centimètres et que
+ * trois décimales (1,85 m) figeraient le dernier chiffre sur vingt pixels. */
+function dm(v, positive, negative, width, decimals = 3) {
   const hemi = v >= 0 ? positive : negative;
   const abs = Math.abs(v);
   const d = Math.floor(abs);
   const m = (abs - d) * 60;
-  return `${String(d).padStart(width, '0')}° ${m.toFixed(3).padStart(6, '0')}′ ${hemi}`;
+  // Deux chiffres avant la virgule, plus le séparateur : d'où `decimals + 3`.
+  const min = m.toFixed(decimals).padStart(decimals + 3, '0');
+  return `${String(d).padStart(width, '0')}° ${min}′ ${hemi}`;
 }
 
 /* -------------------------------------------------------------- polaire -- */

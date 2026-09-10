@@ -167,6 +167,12 @@
     <h2 class="card-title">Carte <span class="hint">SHOM</span></h2>
     <div class="map-frame">
       <div id="map"></div>
+      <!-- Les deux relevés posés sur la carte, remplis par map.js : le niveau de
+           zoom en haut à droite, et en bas les coordonnées du point survolé —
+           celles du bateau quand la souris est ailleurs — avec, en survol, la
+           distance et le relèvement vrai depuis le bateau. -->
+      <p id="map-zoom" class="map-tag map-zoom"></p>
+      <p id="map-readout" class="map-tag map-readout"></p>
       <button type="button" id="recenter" class="recenter on" title="Recentrer sur le bateau">
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
           <circle cx="12" cy="12" r="5" />
