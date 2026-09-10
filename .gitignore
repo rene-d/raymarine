@@ -20,14 +20,14 @@ mfdsim/sftp/**
 # (`cargo tauri android init`), le tout régénérable. Ce qui doit survivre à une
 # régénération vit dans `src-tauri/` : `Info.ios.plist`, `android-postinit-
 # patch.sh`, les icônes, `tauri.conf.json`.
-app/src-tauri/target/
-app/src-tauri/gen/
+mfdview/src-tauri/target/
+mfdview/src-tauri/gen/
 
 # Icônes dérivées par `just icons` (Windows, macOS, Android, tailles diverses) :
 # régénérables d'un coup depuis la seule source versionnée, `icon.png`.
-app/src-tauri/icons/*
-!app/src-tauri/icons/icon.png
-!app/src-tauri/icons/no-alpha.py
+mfdview/src-tauri/icons/*
+!mfdview/src-tauri/icons/icon.png
+!mfdview/src-tauri/icons/no-alpha.py
 
 # Secrets — le JSON Raymarine contient une clé privée SSH (SshPrivateKey)
 ssh/user_settings*.json
@@ -37,9 +37,10 @@ pcap/
 *.pcap
 *.pcapng
 
-# Jeux de tuiles de la carte (MBTiles) : celui du bord pèse 3 Go. L'app les
-# cherche ici (cf. app/README.md), mais ils ne se versionnent pas.
-app/maps/
+# Jeux de tuiles de la carte (MBTiles) : celui du bord pèse 3 Go, il ne se
+# versionne pas. `src/lib.rs` le cherche ici en développement, les tests de
+# `src/mbtiles.rs` y prennent leur jeu SHOM.
+/maps/
 
 # Binaire produit par `go build` dans raynmea/ (le paquet et le binaire portent
 # le même nom, donc le second se glisse dans le répertoire du premier), et la

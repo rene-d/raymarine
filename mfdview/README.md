@@ -71,6 +71,7 @@ iPhone.
 ```sh
 just              # la liste, avec une phrase par recette
 just run          # l'app sur ce Mac
+just install      # l'app compilée, dans ~/Applications (`just install map` avec la carte)
 just mfd          # un MFD simulé, dans un autre terminal
 just ios          # compile et lance sur le simulateur iPhone
 just iphone       # sur un iPhone relié en USB

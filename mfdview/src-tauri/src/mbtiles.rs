@@ -123,7 +123,7 @@ mod tests {
     /// machine.
     fn fixture() -> Option<Tiles> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../maps/shom.mbtiles");
+            .join("../../maps/shom.mbtiles");
         path.exists().then(|| Tiles::open(&path).unwrap())
     }
 

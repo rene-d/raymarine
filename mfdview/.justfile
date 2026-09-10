@@ -1,6 +1,7 @@
 # MFDView — recettes de développement (https://just.systems).
 #
 #     just              la liste des recettes
+#     just install      l'app dans ~/Applications
 #     just ios          compile et lance sur le simulateur iPhone
 #
 # Tout se passe dans `src-tauri`, où vivent Cargo.toml et tauri.conf.json ; les
@@ -39,6 +40,36 @@ build:
 # reste cherché à l'exécution (voir « La carte » dans README.md).
 build-map:
     cargo tauri build --features map
+
+# ---------------------------------------------------------- installation ----
+#
+# `cargo tauri build` dépose MFDView.app dans target/release/bundle/macos ;
+# `install` recompile et l'y prend pour le recopier dans ~/Applications, qui
+# n'exige pas de mot de passe — au contraire de /Applications.
+#
+# La carte n'est pas du voyage par défaut, comme pour `build` : `just install
+# map` compile la caractéristique avec (une minute de SQLite en plus).
+#
+# La CLI signe l'app ad hoc. macOS tient alors chaque réinstallation pour une
+# app *nouvelle* et redemande l'autorisation « réseau local » : sans elle, ni
+# découverte mDNS ni TCP vers le MFD, l'app reste sur « recherche du MFD ».
+
+# Installe l'app dans ~/Applications (`just install map` pour la carte).
+install features="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    features="{{ features }}"
+    cargo tauri build ${features:+--features "$features"}
+    mkdir -p ~/Applications
+    # La copie ne remplace pas un bundle, elle se glisserait dedans ; et un
+    # reliquat de la version d'avant y survivrait. On retire la cible d'abord.
+    rm -rf ~/Applications/MFDView.app
+    cp -R target/release/bundle/macos/MFDView.app ~/Applications/
+    echo "installée : ~/Applications/MFDView.app"
+
+# Retire l'app installée par `just install`.
+uninstall:
+    rm -rf ~/Applications/MFDView.app
 
 # ------------------------------------------------------------------ iOS ----
 #
