@@ -16,9 +16,19 @@ cette session et en reconstruit un flux H.264 lisible, sans rien coder en dur :
      (24) et fragment FU-A (28) sont recombinés en un train Annex-B (préfixe
      `00 00 00 01`), précédé des SPS/PPS du SDP.
 
-La capture doit contenir le RTSP : c'est lui qui apprend à tshark quels ports
-UDP dissèquer en RTP. Pour un flux H.264 « nu » (RTP sans RTSP), il faudrait un
-« decode as » que ce script ne met pas en place.
+Capture sans le RTSP (session ouverte avant le début de la capture) : le script
+se replie automatiquement, puisque c'est le RTSP qui apprend normalement à
+tshark quels ports UDP dissèquer en RTP, et le SDP qui donne SPS/PPS.
+
+  - **flux** — deuxième passe avec l'heuristique RTP de tshark
+    (`-o rtp.heuristic_rtp:TRUE`), qui reconnaît les en-têtes RTP sans « decode
+    as » ;
+  - **codec** — faute de SDP, il est déduit des charges utiles : un flux dont
+    les types de NAL sont plausibles est traité comme H.264 ;
+  - **SPS/PPS** — d'abord cherchés en bande dans le flux ; sinon pris dans la
+    table des jeux relevés dans les SDP des captures du projet (`--param-sets`,
+    par défaut choisi automatiquement en essayant lequel décode proprement), ou
+    imposés avec `--sps`/`--pps`.
 
 Sortie : un fichier `.h264` (Annex-B) par flux vidéo. `--mp4` le remuxe en MP4
 via ffmpeg (le train Annex-B n'a pas d'horloge : la cadence ne sert qu'au remux).
@@ -40,6 +50,7 @@ Usage :
     ./video_extract.py --mfd                             # enregistre le live (découverte auto)
     ./video_extract.py --mfd 192.168.42.1 -o ecran.mp4   # IP imposée, sortie MP4
     ./video_extract.py --mfd --duration 30               # enregistre 30 s puis s'arrête
+    ./video_extract.py clic.pcap --param-sets axiom7     # capture sans RTSP : SPS/PPS imposés
 """
 from __future__ import annotations
 
@@ -58,9 +69,28 @@ TSHARK_FALLBACKS = [
 ]
 
 START_CODE = b"\x00\x00\x00\x01"        # préfixe de NAL en Annex-B
+NAL_TYPE_SPS = 7
+NAL_TYPE_PPS = 8
 NAL_TYPE_STAP_A = 24
 NAL_TYPE_FU_A = 28
 SEQ_MOD = 1 << 16                        # les numéros de séquence RTP sont sur 16 bits
+
+# Repli quand la capture ne contient pas le RTSP : sans lui, tshark ne sait pas
+# quels ports UDP disséquer en RTP et ne voit qu'un flux « data ». L'heuristique
+# reconnaît les en-têtes RTP d'elle-même ; on ne l'active qu'en second passage,
+# pour ne pas risquer de faux positifs quand le RTSP est là.
+RTP_HEURISTIC = ["-o", "rtp.heuristic_rtp:TRUE"]
+
+# SPS/PPS des MFD, relevés dans les `sprop-parameter-sets` des SDP des captures
+# du projet. Ils ne servent que si la capture n'a ni SDP ni SPS/PPS en bande ;
+# la résolution affichée est relue du SPS, pas écrite en dur.
+KNOWN_PARAM_SETS: dict[str, tuple[str, list[str]]] = {
+    # nom        (capture d'origine,       [SPS, PPS] en base64)
+    "axiom7":    ("rm1/rm2/rm6/rm7, E70363",
+                  ["J0LgH41oDIPaEAAAAwAQAAADAUDxB6g=", "KM4ySA=="]),
+    "axiom9":    ("rm13_axiom9, E70481",
+                  ["J0LgH41oBQBboQAAAwABAAADABQPEHqA", "KM4ySA=="]),
+}
 
 # Découverte du MFD en mode --mfd (repris tel quel de discover_mfd()).
 DISCOVERY_GROUP = "224.0.0.1"
@@ -75,6 +105,7 @@ class Stream:
         self.ssrc = ssrc
         self.p_type = p_type
         self.codec = ""                 # renseigné depuis le SDP (« H264 »…)
+        self.guessed = False            # codec déduit des charges, faute de SDP
         self.param_sets: list[bytes] = []   # SPS/PPS décodés du sprop
         self.count = 0                  # nombre de paquets RTP
 
@@ -98,14 +129,15 @@ def find_binary(name: str, override: str | None, fallbacks: list[str]) -> str:
 
 
 def run_tshark(tshark: str, pcap: Path, display_filter: str,
-               fields: list[str]) -> list[list[str]]:
+               fields: list[str], prefs: list[str] | None = None) -> list[list[str]]:
     """Lance tshark en mode « -T fields » et renvoie les lignes découpées.
 
     Le séparateur de champ est la tabulation ; les champs à occurrences
     multiples sont regroupés par tshark avec une virgule, qu'on gère au cas par
-    cas côté appelant.
+    cas côté appelant. `prefs` passe des options `-o` (voir RTP_HEURISTIC).
     """
-    cmd = [tshark, "-r", str(pcap), "-n", "-Y", display_filter, "-T", "fields"]
+    cmd = [tshark, "-r", str(pcap), "-n", *(prefs or []),
+           "-Y", display_filter, "-T", "fields"]
     for f in fields:
         cmd += ["-e", f]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -181,10 +213,250 @@ def parse_sdp(tshark: str, pcap: Path) -> dict[int, tuple[str, list[bytes]]]:
     return table
 
 
+# ----------------------------------------------- faute de SDP : déductions ---
+class _BitReader:
+    """Lecture bit à bit d'un RBSP H.264, octets anti-émulation retirés.
+
+    Dans un NAL, la séquence `00 00 03` code un `00 00` littéral : le `03`
+    n'appartient pas au flux de bits et doit disparaître avant toute lecture.
+    """
+
+    def __init__(self, data: bytes) -> None:
+        rbsp = bytearray()
+        i = 0
+        while i < len(data):
+            if i + 2 < len(data) and data[i] == 0 and data[i + 1] == 0 and data[i + 2] == 3:
+                rbsp += data[i:i + 2]
+                i += 3
+            else:
+                rbsp.append(data[i])
+                i += 1
+        self.data = bytes(rbsp)
+        self.pos = 0
+
+    def u(self, n: int) -> int:
+        """n bits non signés."""
+        value = 0
+        for _ in range(n):
+            byte = self.data[self.pos >> 3]        # IndexError = SPS tronqué
+            value = (value << 1) | ((byte >> (7 - (self.pos & 7))) & 1)
+            self.pos += 1
+        return value
+
+    def ue(self) -> int:
+        """Exp-Golomb non signé."""
+        zeros = 0
+        while self.u(1) == 0:
+            zeros += 1
+            if zeros > 32:
+                raise ValueError("exp-Golomb aberrant")
+        return (1 << zeros) - 1 + (self.u(zeros) if zeros else 0)
+
+    def se(self) -> int:
+        """Exp-Golomb signé."""
+        k = self.ue()
+        return (k + 1) // 2 if k % 2 else -(k // 2)
+
+
+def sps_resolution(sps: bytes) -> tuple[int, int] | None:
+    """Largeur et hauteur en pixels lues dans un SPS, ou None s'il est illisible.
+
+    Sert uniquement à étiqueter les jeux de paramètres dans les messages : on
+    préfère relire la résolution que la coder en dur à côté du base64. Tout NAL
+    qui n'est pas un SPS (un PPS seul passé à `--pps`, par exemple) est refusé
+    plutôt que parcouru au hasard.
+    """
+    if not sps or (sps[0] & 0x1F) != NAL_TYPE_SPS:
+        return None
+    try:
+        br = _BitReader(sps[1:])                   # saut de l'octet d'en-tête NAL
+        profile = br.u(8)
+        br.u(8)                                    # contraintes + réservé
+        br.u(8)                                    # niveau
+        br.ue()                                    # seq_parameter_set_id
+        chroma = 1                                 # 4:2:0 par défaut (baseline)
+        if profile in (100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135):
+            chroma = br.ue()
+            if chroma == 3:
+                br.u(1)                            # separate_colour_plane_flag
+            br.ue()                                # bit_depth_luma_minus8
+            br.ue()                                # bit_depth_chroma_minus8
+            br.u(1)                                # qpprime_y_zero_transform_bypass
+            if br.u(1):                            # seq_scaling_matrix_present
+                for i in range(8 if chroma != 3 else 12):
+                    if br.u(1):
+                        last = nxt = 8
+                        for _ in range(16 if i < 6 else 64):
+                            if nxt:
+                                nxt = (last + br.se() + 256) % 256
+                            last = nxt or last
+        br.ue()                                    # log2_max_frame_num_minus4
+        poc_type = br.ue()
+        if poc_type == 0:
+            br.ue()
+        elif poc_type == 1:
+            br.u(1)
+            br.se()
+            br.se()
+            for _ in range(br.ue()):
+                br.se()
+        br.ue()                                    # max_num_ref_frames
+        br.u(1)                                    # gaps_in_frame_num_value_allowed
+        width = (br.ue() + 1) * 16
+        height_map = br.ue() + 1
+        frame_mbs_only = br.u(1)
+        if not frame_mbs_only:
+            br.u(1)                                # mb_adaptive_frame_field_flag
+        height = (2 - frame_mbs_only) * height_map * 16
+        br.u(1)                                    # direct_8x8_inference_flag
+        if br.u(1):                                # frame_cropping_flag
+            if chroma == 0:
+                sub_x = sub_y = 1
+            elif chroma == 1:
+                sub_x = sub_y = 2
+            elif chroma == 2:
+                sub_x, sub_y = 2, 1
+            else:
+                sub_x = sub_y = 1
+            left, right, top, bottom = br.ue(), br.ue(), br.ue(), br.ue()
+            width -= sub_x * (left + right)
+            height -= sub_y * (2 - frame_mbs_only) * (top + bottom)
+        if width <= 0 or height <= 0:
+            return None
+        return width, height
+    except (IndexError, ValueError):
+        return None
+
+
+def looks_like_h264(payloads: list[bytes], sample: int = 200) -> bool:
+    """Devine si les charges utiles RTP d'un flux portent du H.264.
+
+    Sans SDP il n'y a pas de nom de codec : on regarde l'octet d'en-tête NAL des
+    premières charges. Un flux H.264 a `forbidden_zero_bit` à 0 et un type dans
+    1..28 sur la quasi-totalité des paquets — c'est assez discriminant pour ne
+    pas confondre avec un flux audio ou une charge opaque.
+    """
+    seen = plausible = 0
+    for payload in payloads[:sample]:
+        if not payload:
+            continue
+        seen += 1
+        if not payload[0] & 0x80 and 1 <= (payload[0] & 0x1F) <= 28:
+            plausible += 1
+    return seen > 0 and plausible >= 0.95 * seen
+
+
+def decode_param_set(token: str) -> bytes:
+    """Décode un SPS/PPS donné en ligne de commande, base64 ou hexadécimal."""
+    nal = _b64_nal(token)
+    if nal is not None:
+        return nal
+    cleaned = token.strip().replace(":", "").replace(" ", "")
+    try:
+        nal = bytes.fromhex(cleaned)
+    except ValueError:
+        raise ValueError(f"ni base64 ni hexadécimal : {token!r}") from None
+    if not nal or not 1 <= (nal[0] & 0x1F) <= 23:
+        raise ValueError(f"pas une unité NAL plausible : {token!r}")
+    return nal
+
+
+def inband_param_sets(annexb: bytes) -> list[bytes]:
+    """Premiers SPS/PPS portés par le train lui-même, à remonter en tête.
+
+    Le MFD réémet périodiquement ses SPS/PPS, mais une capture commence rarement
+    dessus : les laisser à leur place rendrait indécodable tout ce qui précède
+    (« non-existing PPS 0 referenced »). Les hisser devant est sans risque, un
+    décodeur relit sans broncher un jeu identique rencontré plus loin.
+
+    Le découpage sur la magie de 4 octets est sûr : l'encodage anti-émulation
+    interdit `00 00 00` à l'intérieur d'une unité NAL.
+    """
+    sps = pps = b""
+    for nal in annexb.split(START_CODE):
+        if not nal:
+            continue
+        kind = nal[0] & 0x1F
+        if kind == NAL_TYPE_SPS and not sps:
+            sps = nal
+        elif kind == NAL_TYPE_PPS and not pps:
+            pps = nal
+        if sps and pps:
+            break
+    return [n for n in (sps, pps) if n]
+
+
+def count_decode_errors(annexb: bytes, ffmpeg: str, frames: int = 12) -> int | None:
+    """Décode le début du train et compte les plaintes de ffmpeg.
+
+    Sert à départager des SPS candidats : avec le mauvais, la taille d'image est
+    fausse et le décodeur se plaint dès le premier macrobloc. Renvoie None si
+    ffmpeg est introuvable (on ne pourra pas départager).
+    """
+    cmd = [ffmpeg, "-nostdin", "-loglevel", "error", "-f", "h264", "-i", "pipe:0",
+           "-frames:v", str(frames), "-f", "null", "-"]
+    try:
+        proc = subprocess.run(cmd, input=annexb, capture_output=True, check=False)
+    except FileNotFoundError:
+        return None
+    return len([ln for ln in proc.stderr.decode(errors="replace").splitlines() if ln.strip()])
+
+
+def choose_param_sets(body: bytes, ffmpeg: str) -> tuple[list[bytes], str]:
+    """Choisit un jeu de la table en essayant lequel décode le plus proprement.
+
+    Les MFD du projet n'ont que deux jeux connus, qui ne diffèrent que par la
+    résolution (800×480 et 1280×720) : le mauvais fait échouer le décodage dès
+    les premiers macroblocs, ce qui suffit à trancher. Faute de ffmpeg, on prend
+    le premier de la table en le signalant à l'appelant.
+    """
+    candidates = [(name, [decode_param_set(t) for t in tokens])
+                  for name, (_origin, tokens) in KNOWN_PARAM_SETS.items()]
+    head = body[:400_000]
+    best: tuple[int, str, list[bytes]] | None = None
+    for name, sets in candidates:
+        errors = count_decode_errors(b"".join(START_CODE + n for n in sets) + head, ffmpeg)
+        if errors is None:                         # pas de ffmpeg : rien à départager
+            fallback, fallback_sets = candidates[0]
+            return fallback_sets, f"{fallback} (table, NON vérifié : ffmpeg absent)"
+        if best is None or errors < best[0]:
+            best = (errors, name, sets)
+        if errors == 0:
+            break
+    assert best is not None                        # la table n'est jamais vide
+    errors, name, sets = best
+    suffix = "" if errors == 0 else f", {errors} erreur(s) de décodage résiduelle(s)"
+    return sets, f"{name} (table, choisi automatiquement{suffix})"
+
+
+def resolve_param_sets(st: Stream, body: bytes, cli_sets: list[bytes],
+                       choice: str, ffmpeg: str) -> tuple[list[bytes], str]:
+    """Décide quels SPS/PPS préfixer au train, et dit d'où ils sortent.
+
+    Ordre de priorité : les jeux imposés en ligne de commande (`--sps/--pps`,
+    puis un `--param-sets` explicite), le SDP, ce que le flux porte lui-même en
+    bande, et en dernier ressort la table des jeux connus — ce sont les deux
+    derniers cas qui rattrapent une capture sans RTSP.
+    """
+    if cli_sets:
+        return cli_sets, "imposés (--sps/--pps)"
+    if choice in KNOWN_PARAM_SETS:
+        return [decode_param_set(t) for t in KNOWN_PARAM_SETS[choice][1]], f"{choice} (table)"
+    if choice == "none":
+        return [], "aucun (--param-sets none)"
+    if st.param_sets:
+        return st.param_sets, "du SDP"
+    inband = inband_param_sets(body)
+    if inband:
+        return inband, "en bande, remontés en tête"
+    return choose_param_sets(body, ffmpeg)
+
+
 # --------------------------------------------------------------- RTP ---------
-def list_streams(tshark: str, pcap: Path) -> list[Stream]:
+def list_streams(tshark: str, pcap: Path,
+                 prefs: list[str] | None = None) -> list[Stream]:
     """Énumère les flux RTP présents (un par SSRC), avec leur type de charge."""
-    rows = run_tshark(tshark, pcap, "rtp", ["rtp.ssrc", "rtp.p_type"])
+    rows = run_tshark(tshark, pcap, "rtp", ["rtp.ssrc", "rtp.p_type"], prefs)
     streams: dict[int, Stream] = {}
     for row in rows:
         if len(row) < 2 or not row[0]:
@@ -201,10 +473,11 @@ def list_streams(tshark: str, pcap: Path) -> list[Stream]:
     return list(streams.values())
 
 
-def rtp_payloads(tshark: str, pcap: Path, ssrc: int) -> list[tuple[int, bytes]]:
+def rtp_payloads(tshark: str, pcap: Path, ssrc: int,
+                 prefs: list[str] | None = None) -> list[tuple[int, bytes]]:
     """Charges utiles RTP d'un flux, en (seq, octets), dans l'ordre de capture."""
     flt = f"rtp.ssrc==0x{ssrc:08x} && rtp.payload"
-    rows = run_tshark(tshark, pcap, flt, ["rtp.seq", "rtp.payload"])
+    rows = run_tshark(tshark, pcap, flt, ["rtp.seq", "rtp.payload"], prefs)
     out: list[tuple[int, bytes]] = []
     for row in rows:
         if len(row) < 2 or not row[0] or not row[1]:
@@ -361,6 +634,15 @@ def main() -> None:
     ap.add_argument("--discover-timeout", type=float, default=15,
                     help="délai de découverte du MFD en mode --mfd (s, défaut 15)")
     ap.add_argument("--ssrc", help="ne traiter que ce flux (ex. 0x016e2295)")
+    ap.add_argument("--param-sets", default="auto",
+                    choices=["auto", "none", *KNOWN_PARAM_SETS],
+                    help="capture sans RTSP ni SPS/PPS en bande : jeu de "
+                         "paramètres à préfixer (défaut auto = essayer lequel "
+                         "de la table décode proprement ; none = ne rien "
+                         "préfixer). Voir --list pour la table.")
+    ap.add_argument("--sps", help="SPS imposé (base64 ou hexadécimal), "
+                                  "prioritaire sur le SDP et sur --param-sets")
+    ap.add_argument("--pps", help="PPS imposé (base64 ou hexadécimal)")
     ap.add_argument("--mp4", action="store_true",
                     help="remuxer aussi en MP4 via ffmpeg")
     ap.add_argument("--fps", type=float, default=20.0,
@@ -387,12 +669,33 @@ def main() -> None:
     if not args.pcap.exists():
         sys.exit(f"{ap.prog}: capture introuvable : {args.pcap}")
 
+    try:
+        cli_sets = [decode_param_set(t) for t in (args.sps, args.pps) if t]
+    except ValueError as exc:
+        ap.error(str(exc))
+
     tshark = find_binary("tshark", args.tshark, TSHARK_FALLBACKS)
+    ffmpeg = find_binary("ffmpeg", args.ffmpeg, [])
+    prefs: list[str] = []
     try:
         streams = list_streams(tshark, args.pcap)
+        if not streams:
+            # Sans RTSP dans la capture, tshark n'a reçu aucune consigne de
+            # dissection : les paquets vidéo restent de simples « data ». On
+            # refait une passe avec l'heuristique RTP, qui reconnaît les
+            # en-têtes d'elle-même.
+            prefs = RTP_HEURISTIC
+            streams = list_streams(tshark, args.pcap, prefs)
+            if streams:
+                print(f"[*] pas de RTSP dans la capture : {len(streams)} flux "
+                      "retrouvé(s) par l'heuristique RTP", file=sys.stderr)
         sdp = parse_sdp(tshark, args.pcap)
     except (RuntimeError, FileNotFoundError) as exc:
         sys.exit(f"{ap.prog}: {exc}")
+
+    if not streams:
+        sys.exit(f"{ap.prog}: aucun flux RTP dans {args.pcap}, même avec "
+                 "l'heuristique (la capture contient-elle de la vidéo ?)")
 
     # Enrichit chaque flux avec son codec et ses paramètres SDP.
     for st in streams:
@@ -400,16 +703,32 @@ def main() -> None:
         st.codec = codec
         st.param_sets = param_sets
 
-    if not streams:
-        sys.exit(f"{ap.prog}: aucun flux RTP dans {args.pcap} "
-                 "(la capture contient-elle bien le RTSP ?)")
+    # Charges utiles mises en cache : le repli en a besoin pour deviner le
+    # codec, et l'extraction les relirait sinon une seconde fois.
+    cache: dict[int, list[tuple[int, bytes]]] = {}
+
+    def payloads_of(st: Stream) -> list[tuple[int, bytes]]:
+        if st.ssrc not in cache:
+            cache[st.ssrc] = rtp_payloads(tshark, args.pcap, st.ssrc, prefs)
+        return cache[st.ssrc]
+
+    # Faute de SDP il n'y a pas de nom de codec : on le déduit des charges.
+    for st in streams:
+        if not st.codec and looks_like_h264([pl for _seq, pl in payloads_of(st)]):
+            st.codec, st.guessed = "H264", True
 
     if args.list:
         print(f"# {len(streams)} flux RTP dans {args.pcap.name}")
         for st in streams:
             sets = f"{len(st.param_sets)} param-sets" if st.param_sets else "sans SDP"
+            codec = (st.codec + " (déduit)" if st.guessed else st.codec) or "?"
             print(f"  SSRC 0x{st.ssrc:08x}  PT {st.p_type}  "
-                  f"{st.codec or '?':6}  {st.count:5d} paquets  {sets}")
+                  f"{codec:16}  {st.count:5d} paquets  {sets}")
+        print("# jeux SPS/PPS connus (--param-sets, utiles sans RTSP) :")
+        for name, (origin, tokens) in KNOWN_PARAM_SETS.items():
+            res = sps_resolution(decode_param_set(tokens[0]))
+            dims = f"{res[0]}×{res[1]}" if res else "résolution illisible"
+            print(f"  {name:10} {dims:16} {origin}")
         return
 
     wanted = None
@@ -422,13 +741,13 @@ def main() -> None:
                  f"({'SSRC absent' if wanted else 'aucun flux H264 vu'}). "
                  "Voir --list.")
 
-    ffmpeg = find_binary("ffmpeg", args.ffmpeg, [])
     multi = len(targets) > 1
     for st in targets:
-        payloads = rtp_payloads(tshark, args.pcap, st.ssrc)
-        ordered, lost = order_by_seq(payloads)
-        preamble = b"".join(START_CODE + ns for ns in st.param_sets)
-        annexb = preamble + depacketize(ordered)
+        ordered, lost = order_by_seq(payloads_of(st))
+        body = depacketize(ordered)
+        param_sets, origin = resolve_param_sets(st, body, cli_sets,
+                                                args.param_sets, ffmpeg)
+        annexb = b"".join(START_CODE + ns for ns in param_sets) + body
 
         if args.output and not multi:
             out_path = args.output
@@ -440,9 +759,10 @@ def main() -> None:
 
         out_path.write_bytes(annexb)
         loss = f", {lost} paquet(s) perdu(s)" if lost else ""
-        sets = "SPS/PPS du SDP" if st.param_sets else "sans SPS/PPS (in-band ?)"
+        res = next((r for r in map(sps_resolution, param_sets) if r), None)
+        dims = f", {res[0]}×{res[1]}" if res else ""
         print(f"écrit {out_path}  ({len(annexb)} octets, {len(ordered)} paquets"
-              f"{loss}, {sets})")
+              f"{loss}, SPS/PPS {origin}{dims})")
 
         if args.mp4:
             mp4_path = out_path.with_suffix(".mp4")

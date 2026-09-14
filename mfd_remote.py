@@ -38,7 +38,7 @@ import threading
 import time
 
 import vlc
-from PySide6.QtCore import QPointF, QRectF, Qt, QThread, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -267,6 +267,15 @@ class TouchOverlay(QWidget):
     """Widget translucide au-dessus de la vidéo : capte souris + pinch trackpad
     et convertit en trames RRCE (mapping linéaire plein écran)."""
     _PINCH_D0 = 0.12                     # demi-écartement initial des 2 doigts
+    # Durée d'appui minimale d'un tap : marge de confort, pas une contrainte du
+    # protocole. L'app Raymarine tient 83…2367 ms sur les captures mfd_click_*,
+    # mais descend à 4 ms sur rm13_axiom9.pcapng — le MFD suit dans les deux cas.
+    # Ce plancher sert donc à nos propres DOWN/UP collés (clic trackpad, tap de
+    # test), pas à imiter une contrainte de l'appareil.
+    _MIN_HOLD = 0.12
+    # Tremblement toléré (px écran) avant de convertir un clic en glissé : sans
+    # cela le moindre frémissement de souris transforme un tap en panoramique.
+    _TAP_SLOP = 3.0
 
     def __init__(self, win):
         super().__init__(win.video_frame)
@@ -283,6 +292,10 @@ class TouchOverlay(QWidget):
         self._pinch_scale = 1.0
         self._pinch_center = QPointF()
         self._last_pos = QPointF()
+        self._press_pos = QPointF()
+        self._down_t = 0.0                   # instant du DOWN (durée d'appui)
+        self._dragging = False               # le slop de tap a été dépassé
+        self._pending_up = None              # UP différé (frac) en attente
         self._move_n = 0                     # throttle du log des MOVE
 
     # ---- géométrie : rectangle vidéo réel dans le widget (letterbox) --------
@@ -318,6 +331,22 @@ class TouchOverlay(QWidget):
             if self._move_n % 8 == 0:
                 log(f"  → MOVE f{finger} ({nx:5d},{ny:5d})  envois={self.link.sent}")
 
+    # ---- tap : DOWN puis UP pas avant _MIN_HOLD -----------------------------
+    def _finish_tap(self, fx, fy):
+        """Relâche, en différant le UP si l'appui a été plus bref que _MIN_HOLD."""
+        wait = self._MIN_HOLD - (time.monotonic() - self._down_t)
+        if wait <= 0:
+            self.send_touch(OP_UP, 0, fx, fy)
+            return
+        self._pending_up = (fx, fy)
+        QTimer.singleShot(int(wait * 1000), self._flush_up)
+
+    def _flush_up(self):
+        if self._pending_up is None:
+            return
+        frac, self._pending_up = self._pending_up, None
+        self.send_touch(OP_UP, 0, *frac)
+
     # ---- souris = doigt 0 ---------------------------------------------------
     def mousePressEvent(self, e):
         frac = self.pos_to_frac(e.position())
@@ -325,7 +354,11 @@ class TouchOverlay(QWidget):
             f"→ frac={frac}")
         if frac is None:
             return
+        self._flush_up()                     # un UP différé ne doit pas doubler ce DOWN
         self._down = True
+        self._dragging = False
+        self._down_t = time.monotonic()
+        self._press_pos = e.position()
         self._last_pos = e.position()
         self.send_touch(OP_DOWN, 0, *frac)
 
@@ -333,9 +366,15 @@ class TouchOverlay(QWidget):
         self.win.update_cursor_readout(e.position())
         if not self._down:
             return
+        if not self._dragging:
+            d = e.position() - self._press_pos
+            if abs(d.x()) < self._TAP_SLOP and abs(d.y()) < self._TAP_SLOP:
+                return                       # tremblement : on reste sur un tap
+            self._dragging = True
         frac = self.pos_to_frac(e.position())
         if frac is None:
             return
+        self._last_pos = e.position()
         self.send_touch(OP_MOVE, 0, *frac)
 
     def mouseReleaseEvent(self, e):
@@ -345,14 +384,15 @@ class TouchOverlay(QWidget):
         self._down = False
         frac = self.pos_to_frac(e.position()) or self.pos_to_frac(self._last_pos)
         if frac:
-            self.send_touch(OP_UP, 0, *frac)
+            self._finish_tap(*frac)
 
     # ---- touche de test : tap au centre, sans passer par la souris ----------
     def keyPressEvent(self, e):
         if e.key() in (Qt.Key_T, Qt.Key_Space):
             log("[test] tap au centre (0.5,0.5) demandé au clavier")
+            self._down_t = time.monotonic()
             self.send_touch(OP_DOWN, 0, 0.5, 0.5)
-            self.send_touch(OP_UP, 0, 0.5, 0.5)
+            self._finish_tap(0.5, 0.5)
             self.win.set_status(
                 f"TEST tap centre — connecté={self.link.connected}, "
                 f"{self.link.sent} trames envoyées au total")
@@ -430,6 +470,10 @@ class MainWindow(QMainWindow):
         # VLC
         self.vlc = vlc.Instance("--no-xlib", "--quiet", "--no-audio")
         self.player = self.vlc.media_player_new()
+        # Sans cela la vue créée par VLC (NSView sur macOS, fenêtre X11 ailleurs)
+        # avale clics et touches : l'overlay Qt ne verrait plus rien passer.
+        self.player.video_set_mouse_input(False)
+        self.player.video_set_key_input(False)
 
         central = QWidget()
         lay = QVBoxLayout(central)
@@ -447,6 +491,9 @@ class MainWindow(QMainWindow):
         self.overlay = TouchOverlay(self)
         self.overlay.setGeometry(self.video_frame.rect())
         self.overlay.raise_()
+        # Le cadre vidéo change aussi de taille sans redimensionnement de la
+        # fenêtre (hauteur de la barre d'état) : resizeEvent ne suffit pas.
+        self.video_frame.installEventFilter(self)
 
         self._bind_vlc_output()
 
@@ -504,6 +551,11 @@ class MainWindow(QMainWindow):
                 f"{link} · {self.link.sent} envois | MFD {self.host} — "
                 f"curseur ({nx},{ny}) [{frac[0]*100:.0f}%,{frac[1]*100:.0f}%] "
                 f"| T=tap test")
+
+    def eventFilter(self, obj, e):
+        if obj is self.video_frame and e.type() == QEvent.Type.Resize:
+            self.overlay.setGeometry(self.video_frame.rect())
+        return super().eventFilter(obj, e)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)

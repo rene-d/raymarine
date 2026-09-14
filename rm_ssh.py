@@ -31,6 +31,14 @@ mode (utile seulement face à une cible dotée d'un shell) ; une commande passé
 après `--` est alors soit exécutée par le shell (mode `--ssh`), soit jouée comme
 commande **batch SFTP** (`ls`, `get`, `put`, `cd`… ; mode SFTP par défaut).
 
+Sans commande après `--`, la session SFTP interactive passe par un **REPL**
+maison (`--no-repl` pour le sftp brut d'autrefois) : même jeu de commandes, mais
+avec un historique conservé d'une session à l'autre (`~/.rm_ssh_history`, rappel
+par ↑) et la **complétion TAB** des commandes et des chemins — distants comme
+locaux. Le client sftp n'offre ni l'un ni l'autre dès que son entrée n'est pas
+un terminal, ce qui est toujours le cas en mode `--docker` ; le REPL, lui,
+pilote un sftp unique en mode batch et lui parle par tubes (cf. « REPL SFTP »).
+
 Découverte : sans --host, le MFD est découvert en rejoignant le groupe multicast
 224.0.0.1:5800 (mêmes annonces que raydb_client.py) ; on se
 connecte à l'IP SOURCE du datagramme (adresse WiFi/LAN du MFD), et NON à l'IP
@@ -44,13 +52,18 @@ Exemples :
     python3 rm_ssh.py settings.json -- ls -la /            # commande batch SFTP
     python3 rm_ssh.py settings.json -- get /Screenshots/x.png   # télécharge un fichier
     python3 rm_ssh.py settings.json --ssh -- ls -la /      # exec shell (cible avec shell)
+    python3 rm_ssh.py settings.json --no-repl               # sftp brut, sans REPL
     python3 rm_ssh.py settings.json --print-command        # affiche juste la cmd
 """
 
 import argparse
+import atexit
+import glob
 import json
 import os
+import re
 import shutil
+import signal
 import socket
 import stat
 import struct
@@ -58,6 +71,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 DEFAULT_USER = "media_rw"
 DEFAULT_PORT = 22
@@ -243,13 +257,14 @@ def write_temp_keydir(key_text):
     return d, key_file
 
 
-def build_command(binary, key_path, args, remote_cmd):
+def build_command(binary, key_path, args, remote_cmd, batch=False):
     cmd = [binary, "-i", key_path]
     cmd += COMPAT_SSH_OPTS
     if binary == "sftp":
         # Une commande distante devient un batch SFTP lu sur stdin (`-b -`) :
-        # pas de fichier temporaire à monter, y compris en mode Docker.
-        if remote_cmd:
+        # pas de fichier temporaire à monter, y compris en mode Docker. Le REPL
+        # (batch=True) emprunte le même canal, ligne à ligne.
+        if remote_cmd or batch:
             cmd += ["-b", "-"]
         cmd += ["-P", str(args.port), f"{args.user}@{args.host}"]
     else:  # ssh
@@ -267,6 +282,392 @@ def build_docker_command(inner_cmd, host_keydir, image, tty):
         run.append("-t")
     run += ["-v", f"{os.path.realpath(host_keydir)}:{CONTAINER_MOUNT_DIR}:ro", image]
     return run + inner_cmd
+
+
+# --------------------------------------------------------------- REPL SFTP ---
+# Le REPL pilote UN client `sftp -b -` persistant (une seule connexion, un seul
+# handshake) mais avec notre propre invite : d'où l'historique entre sessions
+# (readline, HISTORY_FILE) et la complétion TAB, que sftp ne fournit pas dès que
+# son entrée n'est plus un terminal — et elle ne l'est jamais en mode Docker.
+#
+# Le dialogue avec sftp découle de son comportement en mode batch :
+#   1. il s'arrête à la PREMIÈRE erreur, sauf si la commande est préfixée de
+#      « - » (« -ls /absent » signale puis continue) : on préfixe donc tout ;
+#   2. il n'imprime « sftp> <commande> » qu'au moment où il LIT la commande, en
+#      vidant alors son tampon stdio : il n'y a aucune invite de fin à guetter.
+#      Chaque commande est donc suivie d'une ligne sentinelle « #<jeton> » — un
+#      commentaire, que sftp ignore en silence — dont l'écho « sftp> #<jeton> »
+#      borne la sortie ET force le vidage du tampon ;
+#   3. les erreurs partent sur stderr, non tamponné : on le fusionne à stdout
+#      (quitte à ce qu'un message devance l'écho de sa propre commande).
+HISTORY_FILE = os.path.expanduser("~/.rm_ssh_history")
+HISTORY_SIZE = 2000
+LISTING_TTL = 10.0          # durée de validité d'un listing distant (complétion)
+
+# Commandes du client sftp (OpenSSH), proposées à la complétion du premier mot.
+SFTP_COMMANDS = [
+    "bye", "cd", "chgrp", "chmod", "chown", "copy", "cp", "df", "exit", "get",
+    "help", "lcd", "lls", "lmkdir", "ln", "lpwd", "ls", "lumask", "mkdir",
+    "progress", "put", "pwd", "quit", "reget", "rename", "reput", "rm",
+    "rmdir", "symlink", "version",
+]
+
+
+def _sftp_quote(path):
+    """Échappe pour la ligne de commande sftp : espaces, guillemets et jokers.
+
+    sftp découpe ses arguments lui-même (espaces séparateurs, « \\ » et
+    guillemets protègent) et globalise `*?[]` : un nom de fichier quelconque
+    doit donc être protégé caractère par caractère."""
+    return re.sub(r"([\\ \t\"'*?\[\]])", r"\\\1", path)
+
+
+def _sftp_unquote(word):
+    """Inverse de _sftp_quote : rend le chemin réel d'un mot tel qu'il est tapé."""
+    out, i, quote = [], 0, None
+    while i < len(word):
+        c = word[i]
+        if c == "\\" and i + 1 < len(word):
+            out.append(word[i + 1])
+            i += 2
+            continue
+        if quote:
+            quote = None if c == quote else quote
+            if quote:
+                out.append(c)
+        elif c in "\"'":
+            quote = c
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _split_words(line):
+    """Découpe une ligne comme sftp, en couples (position, texte brut).
+
+    La position sert à retrouver le mot que l'on est en train de taper : elle
+    seule permet de recoller un mot que readline aurait coupé sur un espace
+    échappé (« Mes\\ Routes »)."""
+    words, i, n = [], 0, len(line)
+    while i < n:
+        while i < n and line[i] in " \t":
+            i += 1
+        if i >= n:
+            break
+        start, quote = i, None
+        while i < n:
+            c = line[i]
+            if c == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if quote:
+                quote = None if c == quote else quote
+            elif c in "\"'":
+                quote = c
+            elif c in " \t":
+                break
+            i += 1
+        words.append((start, line[start:i]))
+    return words
+
+
+class SftpSession:
+    """Un `sftp -b -` persistant, piloté commande par commande (cf. supra)."""
+
+    def __init__(self, cmd):
+        self.proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, bufsize=0,
+            # Session à part : un Ctrl-C à l'invite ne doit pas emporter le
+            # sftp (il quitterait) ; pendant un transfert, c'est nous qui lui
+            # relayons le signal, cf. interrupt().
+            start_new_session=True)
+        self._token = f"rm_ssh_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+        self._seq = 0
+        self._pending = b""          # octets lus au-delà du dernier marqueur
+        self._listings = {}          # cache des listings distants (complétion)
+
+    # ------------------------------------------------------- bas niveau ---
+    def _sentinel(self):
+        self._seq += 1
+        return f"#{self._token}_{self._seq}"
+
+    def _write(self, text):
+        try:
+            self.proc.stdin.write(text.encode())
+            self.proc.stdin.flush()
+        except OSError as e:               # BrokenPipeError inclus
+            raise ConnectionError(f"sftp a fermé son entrée ({e})") from e
+
+    def _read_until(self, marker):
+        """Lit jusqu'au marqueur et renvoie ce qui précède.
+
+        ConnectionError si sftp s'arrête avant : le message porte alors ce qui
+        avait été lu (échec d'authentification, hôte injoignable…)."""
+        data, mark = self._pending, marker.encode()
+        self._pending = b""
+        fd = self.proc.stdout.fileno()
+        while mark not in data:
+            try:
+                chunk = os.read(fd, 65536)
+            except KeyboardInterrupt:
+                self.interrupt()           # Ctrl-C : abréger le transfert
+                continue
+            except OSError as e:
+                raise ConnectionError(f"lecture sftp impossible : {e}") from e
+            if not chunk:
+                raise ConnectionError(data.decode("utf-8", "replace"))
+            data += chunk
+        head, _, self._pending = data.partition(mark)
+        return head.decode("utf-8", "replace")
+
+    def interrupt(self):
+        """Relaie un Ctrl-C au sftp, qui vit dans sa propre session."""
+        try:
+            os.killpg(os.getpgid(self.proc.pid), signal.SIGINT)
+        except OSError:
+            pass
+
+    # ------------------------------------------------------- haut niveau ---
+    def start(self):
+        """Attend que la connexion soit faite ; renvoie la bannière de sftp."""
+        sentinel = self._sentinel()
+        self._write(sentinel + "\n")
+        return self._read_until(f"sftp> {sentinel}\n")
+
+    def run(self, command):
+        """Joue une commande de l'utilisateur et renvoie sa sortie.
+
+        Toute commande peut changer ce qu'un listing montrerait (`cd`, `rm`,
+        `mkdir`, `rename`…) : le cache de complétion est donc vidé."""
+        self._listings.clear()
+        return self._run(command)
+
+    def _run(self, command):
+        """Envoie une commande, renvoie sa sortie (écho et sentinelle retirés)."""
+        # Le « - » qui neutralise l'arrêt sur erreur, sauf si l'utilisateur l'a
+        # déjà mis lui-même (sftp refuserait « --ls »).
+        sent = command if command.startswith("-") else "-" + command
+        sentinel = self._sentinel()
+        self._write(f"{sent}\n{sentinel}\n")
+        out = self._read_until(f"sftp> {sentinel}\n")
+        return out.replace(f"sftp> {sent}\n", "", 1)
+
+    def close(self):
+        """Termine proprement la session et renvoie le code de sortie de sftp."""
+        if self.proc.poll() is None:
+            try:
+                self._write("quit\n")
+                self.proc.wait(timeout=5)
+            except (ConnectionError, subprocess.TimeoutExpired):
+                self.proc.kill()
+                self.proc.wait()
+        return self.proc.returncode
+
+    def listdir(self, path):
+        """Entrées distantes de `path` : liste de (nom, est_un_dossier).
+
+        Mémorisée LISTING_TTL secondes, et jusqu'à la prochaine commande de
+        l'utilisateur : une frappe de TAB coûte sinon un aller-retour SFTP, et
+        readline en déclenche deux pour afficher les candidats. Sortie analysée = celle de `ls -la`, dont le nom (dernier
+        champ) peut contenir des espaces, d'où le découpage en 9 champs."""
+        now = time.monotonic()
+        cached = self._listings.get(path)
+        if cached and now - cached[0] < LISTING_TTL:
+            return cached[1]
+        try:
+            out = self._run("ls -la " + (_sftp_quote(path) if path else "."))
+        except ConnectionError:
+            return []
+        entries = []
+        for line in out.splitlines():
+            fields = line.split(None, 8)
+            if len(fields) < 9 or len(fields[0]) < 10:   # ni droits ni nom
+                continue
+            name = fields[8].split(" -> ", 1)[0]         # lien symbolique
+            name = name.rstrip("/").rsplit("/", 1)[-1]   # certains serveurs
+            if name in ("", ".", ".."):                  # renvoient un chemin
+                continue
+            entries.append((name, fields[0].startswith("d")))
+        self._listings[path] = (now, entries)
+        return entries
+
+
+class SftpCompleter:
+    """Complétion TAB : commandes sftp, chemins distants (interrogés sur la
+    session en cours) et chemins locaux (lcd, lls, put, `get <cible>`)."""
+
+    def __init__(self, session):
+        self.session = session
+        self.matches = []
+
+    def complete(self, text, state):
+        if state == 0:
+            try:
+                self.matches = self._compute()
+            except Exception:              # noqa: BLE001 — readline avale tout
+                self.matches = []          # et laisserait la complétion muette
+        return self.matches[state] if state < len(self.matches) else None
+
+    def _compute(self):
+        import readline
+
+        line = readline.get_line_buffer()
+        begidx, endidx = readline.get_begidx(), readline.get_endidx()
+        words = _split_words(line)
+        # Mot en cours = celui qui couvre le curseur ; sinon un mot vide qui
+        # commence là (« ls <TAB> »). On le retrouve par sa position, car
+        # readline, lui, coupe sur les espaces même échappés.
+        start = endidx
+        for pos, word in words:
+            if pos <= endidx <= pos + len(word):
+                start = pos
+                break
+        index = sum(1 for pos, _ in words if pos < start)   # 0 = la commande
+        typed = _sftp_unquote(line[start:endidx])           # préfixe à compléter
+        kept = _sftp_unquote(line[start:begidx])            # part non remplacée
+
+        if index == 0:
+            return [c[len(kept):] for c in SFTP_COMMANDS
+                    if c.startswith(typed)]
+
+        kind = self._arg_kind(words[0][1] if words else "", index)
+        if kind == "remote":
+            candidates = self._remote(typed)
+        elif kind == "local":
+            candidates = self._local(typed)
+        else:
+            return []
+        # readline remplace [begidx, endidx) : on rend le candidat complet
+        # (ré-échappé) privé de ce qui précède begidx et reste donc à l'écran.
+        return [_sftp_quote(c[len(kept):]) for c in candidates]
+
+    @staticmethod
+    def _arg_kind(command, index):
+        """Le n-ième argument de `command` désigne-t-il un chemin local, distant
+        ou autre chose (mode chmod, aucun argument attendu…) ?"""
+        cmd = command.lstrip("-").lower()
+        if cmd.startswith("!"):
+            return "local"
+        if cmd in ("lcd", "lls", "lmkdir", "lumask"):
+            return "local"
+        if cmd in ("get", "reget"):
+            return "remote" if index == 1 else "local"
+        if cmd in ("put", "reput"):
+            return "local" if index == 1 else "remote"
+        if cmd in ("chmod", "chown", "chgrp"):
+            return None if index == 1 else "remote"
+        if cmd in ("pwd", "lpwd", "version", "progress", "help", "?",
+                   "quit", "exit", "bye"):
+            return None
+        return "remote"
+
+    def _remote(self, word):
+        head, sep, prefix = word.rpartition("/")
+        entries = self.session.listdir(head + sep if sep else "")
+        return sorted(head + sep + name + ("/" if isdir else "")
+                      for name, isdir in entries if name.startswith(prefix))
+
+    @staticmethod
+    def _local(word):
+        expanded = os.path.expanduser(word)
+        # Le candidat doit prolonger le mot tel qu'il est tapé : on recolle le
+        # « ~ » que expanduser a déplié.
+        return sorted(word + c[len(expanded):] + ("/" if os.path.isdir(c) else "")
+                      for c in glob.glob(glob.escape(expanded) + "*"))
+
+
+def _save_history(readline):
+    try:
+        readline.write_history_file(HISTORY_FILE)
+        os.chmod(HISTORY_FILE, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+
+
+def setup_readline(session):
+    """Historique persistant (HISTORY_FILE) et complétion TAB.
+
+    Sans readline (build Python sans la bibliothèque), le REPL fonctionne
+    toujours, simplement sans édition de ligne."""
+    try:
+        import readline
+    except ImportError:
+        print("[*] readline absent : ni historique ni complétion", file=sys.stderr)
+        return
+    try:
+        readline.read_history_file(HISTORY_FILE)
+    except OSError:
+        pass                               # premier lancement, ou fichier illisible
+    readline.set_history_length(HISTORY_SIZE)
+    atexit.register(_save_history, readline)
+    readline.set_completer(SftpCompleter(session).complete)
+    # Séparateurs : les blancs (comme sftp) et « / ». readline ne s'en sert que
+    # pour délimiter la portion qu'il remplacera — le complèteur, lui, relit
+    # toute la ligne (_split_words) et voit donc les chemins entiers. Garder
+    # « / » évite d'afficher le chemin complet devant chaque candidat.
+    readline.set_completer_delims(" \t\n/")
+    # macOS livre libedit, dont la syntaxe de binding n'est pas celle de GNU
+    # readline. `readline.backend` date de Python 3.13, d'où le repli sur la
+    # docstring du module, qui nomme l'implémentation.
+    if (getattr(readline, "backend", "") == "editline"
+            or "libedit" in (readline.__doc__ or "")):
+        readline.parse_and_bind("bind ^I rl_complete")
+    else:
+        readline.parse_and_bind("tab: complete")
+
+
+def run_repl(cmd, prompt="sftp> "):
+    """Boucle interactive au-dessus d'un sftp persistant ; renvoie son code."""
+    try:
+        session = SftpSession(cmd)
+    except OSError as e:
+        sys.exit(f"[!] impossible de lancer sftp : {e}")
+
+    try:
+        sys.stdout.write(session.start())          # bannière (« Connected to… »)
+    except ConnectionError as e:
+        sys.stderr.write(str(e))
+        return session.close() or 1
+
+    interactive = sys.stdin.isatty()
+    if interactive:
+        setup_readline(session)
+        print("[*] REPL SFTP : TAB complète, ↑ rappelle l'historique "
+              f"({HISTORY_FILE}), « help » liste les commandes, "
+              "« quit » ou Ctrl-D sort.", file=sys.stderr)
+    try:
+        while True:
+            try:
+                line = input(prompt if interactive else "")
+            except EOFError:
+                if interactive:
+                    print()
+                break
+            except KeyboardInterrupt:              # Ctrl-C : abandonne la ligne
+                print()
+                continue
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line in ("quit", "exit", "bye"):
+                break
+            if line == "!":
+                # `!` seul ouvre un shell interactif SUR L'ENTRÉE de sftp — ici
+                # notre tube : il avalerait les commandes suivantes du REPL.
+                print("[!] shell interactif indisponible depuis le REPL ; "
+                      "utiliser « !commande »", file=sys.stderr)
+                continue
+            try:
+                sys.stdout.write(session.run(line))
+            except ConnectionError as e:
+                sys.stderr.write(str(e))
+                print("[!] session sftp perdue", file=sys.stderr)
+                break
+    finally:
+        rc = session.close()
+    return rc
 
 
 def main():
@@ -293,6 +694,9 @@ def main():
                         f"(image {DOCKER_IMAGE} ; cf. ssh/Dockerfile.client)")
     p.add_argument("--docker-image", default=DOCKER_IMAGE,
                    help=f"Image Docker à utiliser (défaut: {DOCKER_IMAGE})")
+    p.add_argument("--no-repl", action="store_true",
+                   help="Session sftp brute : ni historique, ni complétion TAB "
+                        "(le REPL est le mode interactif par défaut)")
     p.add_argument("--print-command", action="store_true",
                    help="Afficher la commande (clé écrite dans un fichier temporaire) sans l'exécuter")
     p.epilog = "Toute commande distante se place après un '--' :  rm_ssh.py settings.json -- ls -la /"
@@ -326,13 +730,19 @@ def main():
     batch_input = None
     if binary == "sftp" and remote_cmd:
         batch_input = " ".join(remote_cmd) + "\n"
+    # Sans commande distante, une session SFTP interactive passe par notre REPL
+    # (historique + complétion TAB, cf. « REPL SFTP » plus haut), qui pilote un
+    # sftp en mode batch : il lui faut donc `-b -` et des tubes, pas de tty.
+    use_repl = (binary == "sftp" and not remote_cmd and not args.no_repl
+                and not args.print_command)
     # En mode Docker, ssh -i pointe la clé recopiée dans le conteneur.
     cmd = build_command(binary, CONTAINER_KEY if args.docker else key_path,
-                        args, remote_cmd)
+                        args, remote_cmd, batch=use_repl)
     if args.docker:
         # tty seulement pour une session interactive (shell ou sftp), pas pour
-        # une commande distante (exec ou batch SFTP) ni derrière un pipe.
-        tty = sys.stdin.isatty() and not remote_cmd
+        # une commande distante (exec ou batch SFTP), ni derrière un pipe, ni
+        # pour le REPL — qui parle à sftp par des tubes.
+        tty = sys.stdin.isatty() and not remote_cmd and not use_repl
         cmd = build_docker_command(cmd, keydir, args.docker_image, tty)
 
     if args.print_command:
@@ -344,7 +754,9 @@ def main():
     try:
         print(f"[*] Connexion {binary} vers {args.user}@{args.host}:{args.port}"
               f"{' (via Docker)' if args.docker else ''} …", file=sys.stderr)
-        if batch_input is not None:
+        if use_repl:
+            rc = run_repl(cmd)
+        elif batch_input is not None:
             # Le code de retour est celui de ssh/sftp : on le relaie tel quel
             # (cf. sys.exit plus bas), il n'a pas à lever ici.
             rc = subprocess.run(cmd, input=batch_input, text=True,

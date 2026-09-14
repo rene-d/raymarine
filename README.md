@@ -52,6 +52,12 @@ simulé croise en mer d'Iroise.*
   `raynmea/README.md`.
 - `mfd_remote.py` — recopie d'écran RTSP + télécommande tactile (VLC + RRCE).
 - `rm_ssh.py` — connexion SSH/SFTP au MFD via la clé du `user_settings_*.json`.
+  La session interactive passe par un REPL maison : historique conservé d'une
+  fois sur l'autre (`~/.rm_ssh_history`) et complétion TAB des commandes et des
+  chemins, distants comme locaux (`--no-repl` pour le `sftp` brut).
+- `rm_ownerauth.py` — envoie la commande `1500007` (RequestOwnership, TCP 8182)
+  pour faire autoriser une clé publique SSH (+ certificat) ; découverte auto ou
+  `--ip`, à partir d'un `user_settings_*.json` ou d'une clé « ssh-rsa AAAA… ».
 
 ### Télécommande (RRCE)
 
@@ -127,9 +133,16 @@ paquets (rebouclage de séquence, déduplication) et **dépaquétise** le H.264
 ./video_extract.py pcap/axiom.pcapng --mp4    # + remux MP4 (ffmpeg)
 ```
 
-La capture doit contenir le **RTSP** (c'est lui qui apprend à tshark quels ports
-UDP disséquer en RTP). Les pertes de paquets UDP laissent quelques macroblocs
-corrompus — c'est attendu. Prérequis : `tshark` (et `ffmpeg` pour `--mp4`).
+**Capture sans le RTSP** (session vidéo ouverte avant le début de la capture) :
+le script se replie tout seul. Les flux sont retrouvés par l'heuristique RTP de
+tshark, le codec déduit des charges utiles, et les SPS/PPS pris là où ils se
+trouvent — en bande dans le flux (remontés en tête, sinon tout ce qui précède
+est indécodable), sinon dans la table des jeux relevés sur les MFD du projet
+(`--param-sets`, choisie automatiquement en essayant laquelle décode
+proprement), ou imposés avec `--sps`/`--pps`.
+
+Les pertes de paquets UDP laissent quelques macroblocs corrompus — c'est
+attendu. Prérequis : `tshark` (et `ffmpeg` pour `--mp4`).
 
 Le simulateur `mfdsim/` rejoue justement une de ces reconstructions
 (`mfdsim/video/mfd_screen.h264`, l'écran réel d'un Axiom 7) comme flux RTSP.
