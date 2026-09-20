@@ -120,7 +120,7 @@ icons:
     # Quartz/PyObjC — Linux, typiquement) : android-init peut alors régénérer
     # les icônes sans passer par un Mac.
     if [ -d gen/apple/Assets.xcassets/AppIcon.appiconset ]; then
-        python3 icons/no-alpha.py gen/apple/Assets.xcassets/AppIcon.appiconset/*.png
+        icons/no-alpha.py gen/apple/Assets.xcassets/AppIcon.appiconset/*.png
     fi
     mv "$source" icons/icon.png
 

@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["pyobjc-framework-Quartz"]
+# ///
 """Réécrit des PNG sans canal alpha (macOS, via Quartz).
 
 Apple refuse une icône d'application qui porte un canal alpha — même
@@ -11,7 +15,7 @@ D'où ce complément, appelé par `just icons` sur le jeu d'icônes iOS. Le dess
 est simplement redessiné dans un contexte sans alpha, ce qui est sans perte :
 les icônes en sortent identiques à l'œil, et acceptables par App Store Connect.
 
-    python3 no-alpha.py fichier.png [fichier.png…]
+    ./no-alpha.py fichier.png [fichier.png…]
 """
 
 import sys
