@@ -105,6 +105,23 @@ type Observer interface {
 	Link(l Link)
 }
 
+// Discovery dit par où passe la découverte du MFD. Seul Windows a le choix : le
+// service mDNS du système d'abord, le client intégré (`hashicorp/mdns`) en repli
+// quand l'API du système fait défaut. Ailleurs, c'est toujours le second.
+type Discovery struct {
+	Native bool // la requête passe par le service du système
+	// Fallback : non vide, l'API du système a échoué — c'est son erreur — et la
+	// découverte s'est rabattue sur le client intégré.
+	Fallback string
+}
+
+// DiscoveryObserver est facultatif : un Observer qui l'implémente apprend par
+// où passe la découverte, au démarrage puis à chaque changement. Il n'en est
+// rien dit quand l'IP est imposée, la découverte ne tournant pas.
+type DiscoveryObserver interface {
+	Discovery(d Discovery)
+}
+
 // DestLabel rend une destination telle qu'elle sera vraiment utilisée, port
 // compris — de quoi l'annoncer avant même d'avoir ouvert le socket.
 func DestLabel(dest string) string { return withDefaultPort(dest, nmeaUDPPort) }
@@ -207,7 +224,9 @@ func Run(ctx context.Context, cfg Config, obs Observer) error {
 	// Une IP imposée l'est vraiment : la découverte ne tourne que si l'on doit
 	// chercher le MFD, faute de quoi une annonce viendrait défaire le choix fait.
 	if cfg.IP == "" {
-		go newBrowser(target, every, discovered, debug).run(ctx)
+		b := newBrowser(target, every, discovered, debug)
+		b.report = func(d Discovery) { emit(event{when: time.Now(), discovery: &d}) }
+		go b.run(ctx)
 	}
 
 	cli := &client{target: target, paths: paths, emit: emit}
@@ -221,6 +240,12 @@ func Run(ctx context.Context, cfg Config, obs Observer) error {
 		case ev := <-events:
 			if ev.link != nil {
 				obs.Link(*ev.link)
+				continue
+			}
+			if ev.discovery != nil {
+				if do, ok := obs.(DiscoveryObserver); ok {
+					do.Discovery(*ev.discovery)
+				}
 				continue
 			}
 			if ev.path == "" {

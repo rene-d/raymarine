@@ -5,6 +5,7 @@
 #     just test         les tests du paquet
 #     just install      le binaire dans ~/.local/bin
 #     just app          raynmea.app, la passerelle dans la barre de menus
+#     just win          raynmea-menu.exe, la même dans la zone de notification
 #
 # Le paquet et le binaire portent le même nom : `go build` dépose donc
 # `raynmea` *dans* raynmea/ — d'où la ligne qui l'exclut du dépôt (.gitignore
@@ -33,6 +34,13 @@ app_version := "1.0"
 # L'horodatage sécurisé suit l'identité : impossible en ad hoc, et *exigé* par la
 # notarisation — d'où le choix automatique ci-dessous.
 codesign_id := env("RAYNMEA_CODESIGN_ID", "-")
+
+# L'app Windows (cmd/raynmea-menu, main_windows.go) : un .exe par architecture.
+win_archs := "amd64 arm64"
+
+# go-winres, qui compile icônes, manifeste et version en .syso — figé pour que
+# `just icons` refasse les mêmes fichiers d'une machine à l'autre.
+winres := "github.com/tc-hib/go-winres@v0.3.3"
 
 # Cible du Raspberry Pi du bord, pour la recette `cross`.
 cross_goos := "linux"
@@ -83,7 +91,7 @@ app:
       <key>CFBundleShortVersionString</key><string>{{ app_version }}</string>
       <key>CFBundlePackageType</key><string>APPL</string>
       <key>CFBundleIconFile</key><string>raynmea</string>
-      <key>LSMinimumSystemVersion</key><string>14.0</string>
+      <key>LSMinimumSystemVersion</key><string>14.4</string>
       <key>LSUIElement</key><true/>
       <key>NSLocalNetworkUsageDescription</key>
       <string>raynmea cherche le MFD Raymarine sur le réseau du bord (mDNS) et lui diffuse les phrases NMEA en UDP.</string>
@@ -118,7 +126,7 @@ app-install: app
     cp -R {{ app }} ~/Applications/
     echo "installée : ~/Applications/{{ app }}"
 
-# Regénère les icônes depuis les SVG (rsvg-convert, iconutil).
+# Regénère les icônes depuis les SVG (rsvg-convert, iconutil, go-winres).
 icons:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -133,11 +141,52 @@ icons:
     done
     iconutil -c icns raynmea.iconset -o raynmea.icns
     rm -rf raynmea.iconset
-    echo "icônes refaites : menubar.pdf, raynmea.icns"
+    # Windows : l'icône de l'app (« APP ») et sa variante grise (« OFF », liaison
+    # coupée), dessinées à chaque taille plutôt que réduites par le système —
+    # de 16 à 40 px pour la zone de notification selon l'échelle de l'écran.
+    # Le gris n'est que le dégradé de la mer, repeint.
+    res=../winres
+    sed -e 's/#2E86C7/#A3A9AE/' -e 's/#0A3A63/#5C6268/' win.svg > $res/off.svg
+    for s in 16 20 24 32 40 48 64 256; do
+        rsvg-convert -w $s -h $s -f png win.svg -o $res/app-$s.png
+        [ $s = 256 ] || rsvg-convert -w $s -h $s -f png $res/off.svg -o $res/off-$s.png
+    done
+    cd $res
+    go run {{ winres }} make --in winres.json --arch {{ replace(win_archs, " ", ",") }} \
+        --out ../rsrc --product-version {{ app_version }}.0.0 --file-version {{ app_version }}.0.0
+    rm -f off.svg app-*.png off-*.png
+    echo "icônes refaites : menubar.pdf, raynmea.icns, rsrc_windows_*.syso"
 
 # Oublie les options de l'app (NSUserDefaults) — l'app doit être arrêtée.
 app-reset:
     defaults delete {{ app_id }} || true
+
+# ------------------------------------------------------------ app Windows ---
+#
+# Pas de cgo : walk parle à Win32 par syscall, le .exe se compile donc d'ici
+# comme pour n'importe quel GOOS. `-H windowsgui` en fait une app sans console.
+# Icônes, manifeste (Common Controls 6, exigé par walk ; DPI par écran) et
+# version viennent des rsrc_windows_*.syso, que `go build` lie de lui-même à
+# l'architecture correspondante et que `just icons` refait.
+
+# Construit raynmea-menu-amd64.exe et raynmea-menu-arm64.exe (zone de notification).
+win:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for arch in {{ win_archs }}; do
+        GOOS=windows GOARCH=$arch go build -trimpath -ldflags "-H windowsgui -s -w" \
+            -o raynmea-menu-$arch.exe ./cmd/raynmea-menu
+        echo "construit : $PWD/raynmea-menu-$arch.exe"
+    done
+
+# Construit la ligne de commande pour Windows : raynmea-amd64.exe, raynmea-arm64.exe.
+win-cli:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for arch in {{ win_archs }}; do
+        GOOS=windows GOARCH=$arch go build -trimpath -o {{ bin }}-$arch.exe .
+        echo "construit : $PWD/{{ bin }}-$arch.exe"
+    done
 
 # --------------------------------------------------------------- installation --
 
@@ -157,7 +206,7 @@ uninstall:
 
 # Efface les binaires produits, l'app, et le cache de test.
 clean:
-    rm -rf {{ bin }} {{ bin }}-{{ cross_goos }}-{{ cross_goarch }} {{ app }}
+    rm -rf {{ bin }} {{ bin }}-{{ cross_goos }}-{{ cross_goarch }} {{ app }} *.exe
     go clean -testcache
 
 # ---------------------------------------------------------------- exécution --

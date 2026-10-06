@@ -19,8 +19,9 @@
 // Les options vivent dans les NSUserDefaults de l'app : elles survivent au
 // redémarrage, et le programme en ligne de commande les ignore complètement.
 //
-// Une option qui change relance le moteur — la reconnexion RayDB est immédiate,
-// et c'est plus sûr que de reconfigurer une session en cours.
+// Les options, la supervision du moteur et sa relance à chaque réglage sont
+// celles de `internal/desktop`, partagées avec l'app Windows (main_windows.go) :
+// ce fichier n'apporte que la barre de menus.
 package main
 
 import (
@@ -36,7 +37,8 @@ import (
 
 	"github.com/caseymrm/menuet/v2"
 
-	"raynmea/internal/gateway"
+	"github.com/rene-d/raymarine/raynmea/internal/desktop"
+	"github.com/rene-d/raymarine/raynmea/internal/gateway"
 )
 
 const (
@@ -45,10 +47,8 @@ const (
 	// NSUserDefaults (où vivent les options) et pour l'ouverture à la session.
 	appLabel = "local.raynmea.menu"
 
-	// Le journal d'une app qui tourne des semaines : deux fichiers de 8 Mo au
-	// plus (cf. gateway.Config.MaxLogBytes). C'est aussi le plafond proposé à
-	// l'enregistrement, quand on le laisse plafonné.
-	maxLogBytes = 8 << 20
+	// La clé des options dans les NSUserDefaults.
+	optionsKey = "options"
 
 	// Rythme de rafraîchissement de la barre. Une seconde suffit à un cadran de
 	// navigation, et ne fait pas danser la largeur du titre.
@@ -57,83 +57,24 @@ const (
 
 // ------------------------------------------------------------- les options ---
 
-// options est ce que le menu règle, et ce que les NSUserDefaults gardent.
-// `Version` marque simplement qu'elles ont déjà été écrites : sans elle, on ne
-// distinguerait pas « diffusion coupée » de « jamais configuré ».
-type options struct {
-	Version int      `json:"version"`
-	IP      string   `json:"ip"` // vide : découverte mDNS
-	Dests   []string `json:"dests"`
-	UDP     bool     `json:"udp"`
+// defaults garde les options (desktop.Options) dans les NSUserDefaults.
+type defaults struct{}
 
-	// L'enregistrement : un fichier par séance, nommé quand on l'arme, et
-	// gardé dans les options — un autre réglage relance le moteur, et
-	// l'enregistrement doit reprendre dans le *même* fichier.
-	Record     bool   `json:"record"`
-	RecordFile string `json:"record_file"`
-	RecordCap  bool   `json:"record_cap"` // plafonner à maxLogBytes
+func (defaults) Load(o *desktop.Options) error {
+	return menuet.Defaults().Unmarshal(optionsKey, o)
 }
 
-func defaultOptions() options {
-	return options{Version: optionsVersion, Dests: []string{gateway.UDPDefault},
-		UDP: true, RecordCap: true}
-}
-
-const (
-	optionsKey = "options"
-	// optionsVersion marque la forme des options gardées : elle sert à
-	// reconnaître des options déjà écrites, et à rattraper les anciennes.
-	optionsVersion = 2
-)
-
-func loadOptions() options {
-	var o options
-	if err := menuet.Defaults().Unmarshal(optionsKey, &o); err != nil || o.Version == 0 {
-		return defaultOptions()
-	}
-	if o.Version < 2 {
-		// La v1 ignorait l'enregistrement : son plafond est armé, comme il
-		// l'est pour qui n'a jamais rien réglé.
-		o.RecordCap = true
-		o.Version = optionsVersion
-	}
-	return o
-}
-
-func (o options) save() { _ = menuet.Defaults().Marshal(optionsKey, o) }
-
-// config traduit les options en configuration du moteur.
-func (o options) config(logDir string) gateway.Config {
-	cfg := gateway.Config{
-		IP: o.IP,
-		// Le nom du bateau est un réglage, pas une donnée : il faut le demander
-		// en plus de l'arbre de navigation (cf. gateway.PathBoatName).
-		Paths:       append(gateway.PathsDefault(), gateway.PathBoatName),
-		NoteOut:     filepath.Join(logDir, "suivi.log"),
-		MaxLogBytes: maxLogBytes,
-	}
-	if o.UDP {
-		cfg.Dests = o.Dests
-	}
-	if o.Record && o.RecordFile != "" {
-		cfg.TraceOut = filepath.Join(logDir, o.RecordFile)
-		if o.RecordCap {
-			cfg.TraceMax = maxLogBytes
-		}
-	}
-	return cfg
+func (defaults) Save(o desktop.Options) error {
+	return menuet.Defaults().Marshal(optionsKey, o)
 }
 
 // ------------------------------------------------------------------ l'app ----
 
 type app struct {
-	logDir string
-	reload chan struct{} // capacité 1, coalescé : « relis les options »
+	eng *desktop.Engine
 
 	mu          sync.Mutex
-	opts        options
-	dash        *gateway.Dashboard // refait à chaque session
-	fingerprint string             // ce que le menu affiche déjà, pour ne le rafraîchir qu'utilement
+	fingerprint string // ce que le menu affiche déjà, pour ne le rafraîchir qu'utilement
 }
 
 func main() {
@@ -147,15 +88,13 @@ func main() {
 		os.Exit(2)
 	}
 
-	a := &app{reload: make(chan struct{}, 1), opts: loadOptions()}
-	a.logDir = logDir()
-	a.dash = gateway.NewDashboard()
+	a := &app{eng: desktop.NewEngine(logDir(), defaults{})}
 
 	// Le contexte et le groupe d'attente de menuet : le moteur s'arrête avec
 	// l'app, et ses sorties se referment avant qu'elle ne rende la main.
 	wg, ctx := menuet.App().GracefulShutdownHandles()
 	wg.Add(3)
-	go func() { defer wg.Done(); a.supervise(ctx) }()
+	go func() { defer wg.Done(); a.eng.Supervise(ctx) }()
 	go func() { defer wg.Done(); a.refreshLoop(ctx) }()
 	go func() { defer wg.Done(); a.hangup(ctx) }()
 
@@ -197,103 +136,23 @@ func (a *app) hangup(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-sig:
-			a.apply(func(*options) {})
+			a.apply(func(*desktop.Options) {})
 		}
 	}
 }
 
 // ------------------------------------------------------------- le moteur -----
 
-// supervise tient une session, et la refait à chaque changement d'option.
-func (a *app) supervise(root context.Context) {
-	for {
-		a.mu.Lock()
-		opts := a.opts
-		a.dash = gateway.NewDashboard()
-		a.mu.Unlock()
-
-		ctx, cancel := context.WithCancel(root)
-		errc := make(chan error, 1)
-		go func() { errc <- gateway.Run(ctx, opts.config(a.logDir), a) }()
-
-		select {
-		case <-root.Done():
-			cancel()
-			<-errc
-			return
-		case <-a.reload:
-			cancel()
-			<-errc
-		case err := <-errc:
-			// Run ne rend la main de lui-même que si une sortie refuse de
-			// s'ouvrir : une destination illisible, un journal impossible. Rien
-			// ne se réparera tout seul — on l'affiche et on attend un réglage.
-			cancel()
-			if err != nil {
-				a.mu.Lock()
-				a.dash.Note(time.Now(), "erreur : "+err.Error(), false)
-				a.mu.Unlock()
-			}
-			select {
-			case <-root.Done():
-				return
-			case <-a.reload:
-			}
-		}
-	}
-}
-
-// apply retient les options, les enregistre, et relance le moteur.
-func (a *app) apply(change func(*options)) {
-	a.mu.Lock()
-	change(&a.opts)
-	opts := a.opts
-	a.mu.Unlock()
-	opts.save()
-	select {
-	case a.reload <- struct{}{}:
-	default: // une relance déjà demandée relira les mêmes options
-	}
+// apply retient les options, les enregistre, relance le moteur, et redessine le
+// menu.
+func (a *app) apply(change func(*desktop.Options)) {
+	a.eng.Apply(change)
 	menuet.App().MenuChanged()
 }
 
-func (a *app) options() options {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.opts
-}
+func (a *app) options() desktop.Options { return a.eng.Options() }
 
-// ------------------------------------------------- ce que le moteur rend -----
-
-// Note et Update font de l'app l'Observer du moteur.
-
-func (a *app) Note(ts time.Time, text string, quiet bool) {
-	a.mu.Lock()
-	dash := a.dash
-	a.mu.Unlock()
-	dash.Note(ts, text, quiet)
-}
-
-func (a *app) Update(u gateway.Update) {
-	a.mu.Lock()
-	dash := a.dash
-	a.mu.Unlock()
-	dash.Update(u)
-}
-
-func (a *app) Link(l gateway.Link) {
-	a.mu.Lock()
-	dash := a.dash
-	a.mu.Unlock()
-	dash.Link(l)
-}
-
-func (a *app) snapshot() gateway.Snapshot {
-	a.mu.Lock()
-	dash := a.dash
-	a.mu.Unlock()
-	return dash.Snapshot()
-}
+func (a *app) snapshot() gateway.Snapshot { return a.eng.Snapshot() }
 
 // ------------------------------------------------------------ la barre -------
 
@@ -360,7 +219,7 @@ func (a *app) menu() []menuet.MenuItem {
 
 	items = append(items,
 		menuet.Regular{Text: "Diffusion UDP", State: o.UDP, Clicked: func() {
-			a.apply(func(o *options) { o.UDP = !o.UDP })
+			a.apply(func(o *desktop.Options) { o.UDP = !o.UDP })
 		}},
 		menuet.Regular{Text: "Destinations", Children: a.destinations},
 		menuet.Regular{Text: "MFD", Children: a.mfd},
@@ -368,7 +227,7 @@ func (a *app) menu() []menuet.MenuItem {
 		a.recordItem(o),
 		menuet.Regular{Text: "Limiter l'enregistrement à 8 Mo", State: o.RecordCap,
 			Subtitle: []menuet.TextRun{{Text: "au-delà, le fichier bascule en « .1 » et repart"}},
-			Clicked:  func() { a.apply(func(o *options) { o.RecordCap = !o.RecordCap }) }},
+			Clicked:  func() { a.apply(func(o *desktop.Options) { o.RecordCap = !o.RecordCap }) }},
 	)
 	return items
 }
@@ -440,16 +299,13 @@ func reading2(label string, r1 gateway.Reading, r2 gateway.Reading) menuet.MenuI
 		{Text: text, Monospaced: true, Color: color}}}
 }
 
-// recordItem arme ou désarme l'enregistrement. Le nom du fichier est choisi au
-// moment où l'on arme, et gardé : les autres réglages relancent le moteur, et
-// la séance doit se poursuivre dans le même fichier plutôt que d'en semer un
-// nouveau à chaque clic.
-func (a *app) recordItem(o options) menuet.MenuItem {
+// recordItem arme ou désarme l'enregistrement (cf. desktop.Options.ToggleRecord).
+func (a *app) recordItem(o desktop.Options) menuet.MenuItem {
 	sub := "suivi, valeurs reçues et phrases NMEA, dans un fichier"
 	if o.Record {
 		sub = o.RecordFile
-		if st, err := os.Stat(filepath.Join(a.logDir, o.RecordFile)); err == nil {
-			sub += " · " + size(st.Size())
+		if st, err := os.Stat(filepath.Join(a.eng.LogDir(), o.RecordFile)); err == nil {
+			sub += " · " + desktop.Size(st.Size())
 		}
 	}
 	return menuet.Regular{
@@ -457,28 +313,9 @@ func (a *app) recordItem(o options) menuet.MenuItem {
 		State:    o.Record,
 		Subtitle: []menuet.TextRun{{Text: sub}},
 		Clicked: func() {
-			a.apply(func(o *options) {
-				o.Record = !o.Record
-				if o.Record {
-					o.RecordFile = "raynmea-" +
-						time.Now().Format("20060102-150405") + ".log"
-					return
-				}
-				o.RecordFile = ""
-			})
+			a.apply(func(o *desktop.Options) { o.ToggleRecord(time.Now()) })
 		},
 	}
-}
-
-// size écrit une taille de fichier comme on la lit, virgule comprise.
-func size(n int64) string {
-	switch {
-	case n >= 1<<20:
-		return strings.Replace(fmt.Sprintf("%.1f Mo", float64(n)/(1<<20)), ".", ",", 1)
-	case n >= 1<<10:
-		return fmt.Sprintf("%d ko", n>>10)
-	}
-	return fmt.Sprintf("%d octets", n)
 }
 
 // destinations : la liste des destinations UDP. Un clic en retire une — c'est
@@ -493,7 +330,7 @@ func (a *app) destinations() []menuet.MenuItem {
 			State:    true,
 			Subtitle: []menuet.TextRun{{Text: "cliquer pour retirer"}},
 			Clicked: func() {
-				a.apply(func(o *options) { o.Dests = without(o.Dests, dest) })
+				a.apply(func(o *desktop.Options) { o.Dests = desktop.Without(o.Dests, dest) })
 			},
 		})
 	}
@@ -506,7 +343,7 @@ func (a *app) destinations() []menuet.MenuItem {
 			go a.askDest()
 		}},
 		menuet.Regular{Text: "Diffuser en broadcast (255.255.255.255)", Clicked: func() {
-			a.apply(func(o *options) { o.Dests = with(o.Dests, "255.255.255.255") })
+			a.apply(func(o *desktop.Options) { o.Dests = desktop.With(o.Dests, "255.255.255.255") })
 		}},
 	)
 	return items
@@ -526,7 +363,7 @@ func (a *app) askDest() {
 	if dest == "" {
 		return
 	}
-	a.apply(func(o *options) { o.Dests = with(o.Dests, dest) })
+	a.apply(func(o *desktop.Options) { o.Dests = desktop.With(o.Dests, dest) })
 }
 
 // mfd : découverte mDNS, ou l'adresse qu'on impose.
@@ -534,7 +371,7 @@ func (a *app) mfd() []menuet.MenuItem {
 	o := a.options()
 	items := []menuet.MenuItem{
 		menuet.Regular{Text: "Découverte mDNS", State: o.IP == "", Clicked: func() {
-			a.apply(func(o *options) { o.IP = "" })
+			a.apply(func(o *desktop.Options) { o.IP = "" })
 		}},
 	}
 	if o.IP != "" {
@@ -558,26 +395,5 @@ func (a *app) askIP() {
 		return
 	}
 	ip := strings.TrimSpace(r.Inputs[0])
-	a.apply(func(o *options) { o.IP = ip })
-}
-
-// ------------------------------------------------------------- listes --------
-
-func with(list []string, v string) []string {
-	for _, x := range list {
-		if x == v {
-			return list
-		}
-	}
-	return append(append([]string(nil), list...), v)
-}
-
-func without(list []string, v string) []string {
-	out := make([]string, 0, len(list))
-	for _, x := range list {
-		if x != v {
-			out = append(out, x)
-		}
-	}
-	return out
+	a.apply(func(o *desktop.Options) { o.IP = ip })
 }

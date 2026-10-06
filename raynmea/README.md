@@ -22,7 +22,41 @@ dépendance, `github.com/hashicorp/mdns` (qui amène `miekg/dns` et `x/net`) :
 Le port annoncé en mDNS est ignoré : le MFD publie 49111 alors que RayDB écoute
 sur **23333** (divergence constatée sur le MFD réel, cf. `mfdsim/mfdsim/mdns.py`).
 
+## Releases
+
+Les [releases](https://github.com/rene-d/raymarine/releases) du dépôt public
+portent les deux apps toutes faites : `raynmea-X.Y.Z-macos.zip` (Apple Silicon
+et Intel, macOS 14.4 ou plus récent) et `raynmea-X.Y.Z-windows-amd64.zip` /
+`-arm64.zip` (Windows 10 1903 ou plus récent). Aucune n'est signée par un
+développeur identifié, et le système le fait savoir au premier lancement :
+
+- **macOS** refuse d'ouvrir l'app téléchargée : Réglages Système →
+  Confidentialité et sécurité → « Ouvrir quand même », ou, une fois pour
+  toutes, `xattr -dr com.apple.quarantine raynmea.app` ;
+- **Windows** affiche l'écran bleu de SmartScreen : « Informations
+  complémentaires » → « Exécuter quand même ».
+
+Une release se fait en poussant un tag `raynmea/vX.Y.Z` sur le dépôt public :
+le workflow `.github/workflows/raynmea-release.yml` construit l'app macOS sur un
+runner macOS (cgo), les `.exe` sur Linux, et publie le tout. Lancé à la main
+(« Run workflow »), il construit les mêmes archives en artefacts du run, sans
+release. La version du `.exe` (ses propriétés dans l'Explorateur) reste celle
+des `.syso`, refaits par `just icons`.
+
 ## Compilation
+
+La ligne de commande s'installe directement depuis le dépôt public (Go 1.26,
+ou un Go qui sait aller chercher son toolchain) :
+
+```sh
+go install github.com/rene-d/raymarine/raynmea@latest   # ou @v1.2.3
+```
+
+Les apps, elles, ne s'installent pas ainsi : celle de macOS doit vivre dans un
+bundle `.app` (voir `just app`), et celle de Windows se lie sans console
+(`just win`). Elles sont dans les [releases](#releases).
+
+Depuis les sources :
 
 ```sh
 go build            # ./raynmea
@@ -35,8 +69,8 @@ pèse ~2 Mo (3,7 → 5,9 Mo sur darwin/arm64).
 
 Le `.justfile` réunit ces commandes et les suivantes — `just` seul en donne la
 liste, `just build`, `just test`, `just install` (dans `~/.local/bin`), `just cross`
-(linux/arm64), `just app` (l'app macOS), `just mfd` et `just listen` pour l'essai
-sans MFD.
+(linux/arm64), `just app` (l'app macOS), `just win` (l'app Windows), `just mfd`
+et `just listen` pour l'essai sans MFD.
 
 ## Usage
 
@@ -188,3 +222,70 @@ Une seule dépendance dans `raynmea` lui-même ; la seconde du module
 - Le **rejeu de capture** (`--replay`), les rendus `--dump` et `--json`, et le
   journal JSON : `raydb_client.py` les fait mieux, tshark sous la main.
 - Aucune touche dans la TUI : Ctrl-C pour quitter.
+
+## L'app Windows (zone de notification)
+
+`raynmea-menu.exe` est la jumelle de l'app macOS : même moteur, mêmes options
+(`internal/desktop`), posée dans la zone de notification. La ligne de commande
+reste disponible à côté (`just win-cli`).
+
+```sh
+just win          # raynmea-menu-amd64.exe et raynmea-menu-arm64.exe
+just win-cli      # raynmea-amd64.exe et raynmea-arm64.exe (ligne de commande)
+```
+
+Les deux se compilent **depuis le Mac**, sans rien installer : l'interface passe
+par Win32 au travers de `github.com/tailscale/walk`, sans cgo. Le `.exe` est
+autonome — pas d'installateur, on le pose où l'on veut et on le lance. Windows 10
+ou 11, Intel/AMD (amd64) ou ARM (arm64).
+
+La zone de notification n'affiche qu'une icône, sans texte à côté : la vitesse
+fond ne peut pas y figurer comme dans la barre de menus de macOS. D'où :
+
+- l'**icône**, en couleur quand la liaison avec le MFD tient, grise sinon ; son
+  **infobulle** donne le bateau, le MFD, la SOG et le COG ;
+- le **clic gauche** ouvre le tableau de bord : SOG, COG, GPS, fond, TWS/TWA,
+  AWS/AWA en gros caractères, grisés quand plus rien ne les rafraîchit, et la
+  dernière note du suivi (une erreur s'y lit sans ouvrir le journal). Une case
+  le garde au premier plan ; le fermer le cache seulement ;
+- le **clic droit** ouvre le menu : les valeurs, puis les mêmes réglages que sur
+  macOS — diffusion UDP, destinations, MFD (mDNS ou IP imposée),
+  enregistrement et son plafond —, et en plus « Ouvrir le dossier des
+  journaux », « Démarrer avec Windows » (la clé `Run` de l'utilisateur) et
+  « Quitter ».
+
+Où vont les choses :
+
+- les options dans `%APPDATA%\raynmea\options.json` — on peut l'éditer, l'app
+  arrêtée ;
+- `suivi.log` et les enregistrements dans `%LOCALAPPDATA%\raynmea\Logs\`, avec
+  les mêmes règles que sur macOS (suivi plafonné à 8 Mo et roulé en `.1`, un
+  fichier par séance d'enregistrement).
+
+À savoir :
+
+- une **seule instance** par session : une seconde le dit et s'efface, faute de
+  quoi chaque phrase partirait en double ;
+- si le **pare-feu Windows** demande d'autoriser l'app sur le réseau (en repli
+  mDNS surtout), il faut accepter — réseaux privés au moins —, sans quoi les
+  réponses mDNS n'arrivent pas : c'est l'équivalent de l'autorisation « réseau
+  local » de macOS. À défaut, « Imposer une IP… » contourne la découverte ;
+- le `.exe` n'est **pas signé** : SmartScreen l'annonce comme « éditeur
+  inconnu » quand il vient d'un téléchargement (« Informations complémentaires »,
+  puis « Exécuter quand même ») ;
+- la **découverte mDNS** passe par le service mDNS de Windows
+  (`DnsServiceBrowse`, Windows 10 1903 ou plus récent) : c'est lui qui tient le
+  port 5353, il n'y a donc ni port à lui disputer ni pare-feu à convaincre pour
+  elle. Si cette API manque ou échoue, la découverte se **rabat** sur le client
+  intégré (`hashicorp/mdns`, celui de macOS et de Linux) pour la session, et le
+  signale sans fenêtre : une ligne ⚠ dans l'infobulle, en tête du menu et dans
+  le tableau de bord, l'erreur de l'API dans le sous-menu MFD et dans
+  `suivi.log`. Ce repli partage le port 5353 avec Windows (`SO_REUSEADDR`) et
+  peut, lui, réclamer l'autorisation du pare-feu. La ligne de commande suit le
+  même chemin, sans l'affichage (la note de repli va sur stderr). **Ni l'un ni
+  l'autre n'a encore été éprouvé sur un vrai PC** ;
+- les **icônes et le manifeste** (Common Controls 6, exigé par walk ; DPI par
+  écran) sont dans `cmd/raynmea-menu/rsrc_windows_*.syso`, que `go build` lie de
+  lui-même. Ils sont versionnés, et refaits par `just icons` depuis
+  `icons/win.svg` (le dessin de `app.svg` sans la marge de macOS) et
+  `winres/winres.json`.

@@ -3,8 +3,10 @@ package gateway
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -244,6 +246,56 @@ func TestAdoptEntry(t *testing.T) {
 	b.adopt(entry(mfd, "192.168.42.42"))
 	if got := tgt.get(); got != "192.168.42.42" {
 		t.Errorf("changement d'adresse non suivi : %q", got)
+	}
+}
+
+// TestNativeFallback : la requête passe par le système tant qu'il répond, se
+// rabat sur le client intégré dès qu'il échoue, et le dit — une fois.
+func TestNativeFallback(t *testing.T) {
+	saved := nativeBrowse
+	defer func() { nativeBrowse = saved }()
+
+	const mfd = "RayDBServer on E70363 1234567 4_11_13._raydb._tcp.local."
+	fail := false
+	nativeCalls, builtinCalls := 0, 0
+	nativeBrowse = func(_ context.Context, _ time.Duration,
+		out chan<- *mdns.ServiceEntry, _ func(string)) error {
+		nativeCalls++
+		if fail {
+			return errors.New("API en panne")
+		}
+		out <- entry(mfd, "192.168.42.1")
+		return nil
+	}
+
+	var notes []string
+	var reports []Discovery
+	tgt := newTarget("")
+	b := newBrowser(tgt, time.Second, func(s string) { notes = append(notes, s) },
+		func(s string) { t.Log(s) })
+	b.report = func(d Discovery) { reports = append(reports, d) }
+	b.builtin = func(context.Context, chan<- *mdns.ServiceEntry) { builtinCalls++ }
+
+	ctx := context.Background()
+	entries := make(chan *mdns.ServiceEntry, 4)
+	b.tour(ctx, entries)
+	b.adopt(<-entries)
+	if nativeCalls != 1 || builtinCalls != 0 || tgt.get() != "192.168.42.1" {
+		t.Fatalf("par le système : %d natif, %d intégré, cible %q",
+			nativeCalls, builtinCalls, tgt.get())
+	}
+
+	fail = true
+	b.tour(ctx, entries)
+	b.tour(ctx, entries)
+	if nativeCalls != 2 || builtinCalls != 2 {
+		t.Errorf("repli : %d natif, %d intégré (veut 2 et 2)", nativeCalls, builtinCalls)
+	}
+	if len(reports) != 1 || reports[0].Native || reports[0].Fallback != "API en panne" {
+		t.Errorf("repli annoncé : %+v", reports)
+	}
+	if len(notes) != 2 || !strings.Contains(notes[1], "repli") {
+		t.Errorf("notes : %q", notes)
 	}
 }
 

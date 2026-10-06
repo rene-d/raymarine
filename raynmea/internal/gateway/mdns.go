@@ -14,6 +14,13 @@
 // bateau, où le WiFi du MFD va et vient et où son bail DHCP peut changer, dix
 // secondes de latence ne coûtent rien, et le changement d'adresse force la
 // reconnexion (cf. `client.go`).
+//
+// Sous Windows, la requête passe d'abord par le service mDNS du système
+// (`DnsServiceBrowse`, cf. `mdns_windows.go`) : c'est lui qui tient le port 5353,
+// qu'il faudrait sinon lui disputer. Si cette API manque ou échoue, la
+// découverte se rabat sur `hashicorp/mdns` pour le reste de la session, et le
+// dit (`Discovery`) — le reste, du choix de l'instance au suivi de l'adresse,
+// est commun.
 package gateway
 
 import (
@@ -87,15 +94,28 @@ type browser struct {
 	note    func(string)
 	debug   func(string)
 	period  time.Duration
+	report  func(Discovery)                                  // par où passe la découverte, à chaque changement
+	native  bool                                             // la requête passe par le service du système
+	builtin func(context.Context, chan<- *mdns.ServiceEntry) // le client intégré : round
 	mu      sync.Mutex
 	chosen  string          // instance retenue (nom mDNS complet, déséchappé)
 	ignored map[string]bool // instances écartées, pour ne le dire qu'une fois
 }
 
 func newBrowser(t *target, period time.Duration, note, debug func(string)) *browser {
-	return &browser{target: t, note: note, debug: debug, period: period,
+	b := &browser{target: t, note: note, debug: debug, period: period,
+		report: func(Discovery) {}, native: nativeBrowse != nil,
 		ignored: map[string]bool{}}
+	b.builtin = b.round
+	return b
 }
+
+// nativeBrowse interroge le service mDNS du système pendant `wait`, et verse
+// ce qu'il trouve dans `out`. Une erreur dit que l'API elle-même fait défaut —
+// absente, ou qui refuse la requête —, pas qu'aucun MFD n'a répondu. Nil là où
+// le système n'en offre pas (tout sauf Windows, cf. mdns_windows.go).
+var nativeBrowse func(ctx context.Context, wait time.Duration,
+	out chan<- *mdns.ServiceEntry, debug func(string)) error
 
 // run interroge jusqu'à l'annulation du contexte.
 func (b *browser) run(ctx context.Context) {
@@ -113,16 +133,34 @@ func (b *browser) run(ctx context.Context) {
 		}
 	}()
 
+	b.report(Discovery{Native: b.native})
 	tick := time.NewTicker(b.period)
 	defer tick.Stop()
 	for {
-		b.round(ctx, entries)
+		b.tour(ctx, entries)
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
 		}
 	}
+}
+
+// tour fait une requête : par le système tant qu'il répond, par hashicorp/mdns
+// sinon. Le repli vaut pour la session — une API absente ne reviendra pas, une
+// API qui refuse a peu de chances de se raviser au tour suivant — et la
+// prochaine session (un réglage, un redémarrage) retentera le système.
+func (b *browser) tour(ctx context.Context, entries chan<- *mdns.ServiceEntry) {
+	if b.native {
+		err := nativeBrowse(ctx, mdnsQueryTimeout, entries, b.debug)
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		b.native = false
+		b.note(fmt.Sprintf("mDNS de Windows indisponible (%v) : repli sur le client intégré", err))
+		b.report(Discovery{Fallback: err.Error()})
+	}
+	b.builtin(ctx, entries)
 }
 
 // round interroge toutes les interfaces d'un coup. En parallèle, parce que

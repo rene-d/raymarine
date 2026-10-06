@@ -62,6 +62,10 @@ type Snapshot struct {
 	Connected bool
 	Boat      string
 
+	// Discovery : par où passe la découverte (zéro tant qu'elle n'a rien dit,
+	// ou quand l'IP est imposée).
+	Discovery Discovery
+
 	SOG, COG, Depth, TWS, TWA, Position Reading
 	AWS, AWA                            Reading
 }
@@ -73,6 +77,7 @@ type Dashboard struct {
 	values    map[string]sample
 	status    string
 	link      Link
+	discovery Discovery
 	updates   int
 	sentences int
 }
@@ -98,6 +103,14 @@ func (d *Dashboard) Note(_ time.Time, text string, quiet bool) {
 func (d *Dashboard) Link(l Link) {
 	d.mu.Lock()
 	d.link = l
+	d.mu.Unlock()
+}
+
+// Discovery retient par où passe la découverte : un repli doit se voir sans
+// relire le suivi, où sa note est vite chassée par les suivantes.
+func (d *Dashboard) Discovery(disc Discovery) {
+	d.mu.Lock()
+	d.discovery = disc
 	d.mu.Unlock()
 }
 
@@ -128,7 +141,7 @@ func (d *Dashboard) Status() string {
 func (d *Dashboard) Snapshot() Snapshot {
 	d.mu.Lock()
 	status, updates, sentences := d.status, d.updates, d.sentences
-	link := d.link
+	link, disc := d.link, d.discovery
 	values := make(map[string]sample, len(d.values))
 	for k, v := range d.values {
 		values[k] = v
@@ -152,7 +165,7 @@ func (d *Dashboard) Snapshot() Snapshot {
 	speed := func(v float64) float64 { return v * msToKn }
 
 	snap := Snapshot{Status: status, Updates: updates, Sentences: sentences,
-		IP: link.IP, Connected: link.Connected}
+		IP: link.IP, Connected: link.Connected, Discovery: disc}
 	if s, ok := values[PathBoatName]; ok {
 		snap.Boat = s.str
 	}

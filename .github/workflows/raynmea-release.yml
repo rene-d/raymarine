@@ -1,0 +1,167 @@
+# Releases de raynmea : l'app macOS (barre de menus) et l'app Windows (zone de
+# notification), non signées par un développeur identifié — voir « Releases »
+# dans raynmea/README.md pour ce que cela coûte à l'ouverture.
+#
+# Déclenchement :
+#   - un tag `raynmea/vX.Y.Z` poussé sur le dépôt public construit les deux
+#     apps et publie la release. Le préfixe `raynmea/` est celui qu'attend Go
+#     pour versionner un module rangé dans un sous-dossier.
+#   - « Run workflow » (workflow_dispatch) construit les mêmes archives, en
+#     artefacts du run seulement, sans release : pour essayer avant de taguer.
+#
+# Le fichier vit dans public-prep (et main) : l'export retire du dépôt public
+# tout fichier suivi qui n'est pas dans public-prep. Il ne tourne que sur le
+# dépôt public — les runners macOS du dépôt privé seraient facturés.
+
+name: raynmea — release
+
+on:
+  push:
+    tags: ["raynmea/v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: raynmea
+
+jobs:
+  version:
+    if: github.repository == 'rene-d/raymarine'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      label: ${{ steps.v.outputs.label }}
+    steps:
+      # version : ce que portent Info.plist et le nom de la release ;
+      # label : ce que portent les noms d'archives. Hors tag, 0.0.0 et le
+      # commit, pour qu'une archive d'essai ne passe pas pour une version.
+      - id: v
+        working-directory: .
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            v=${GITHUB_REF_NAME#raynmea/v}
+            echo "version=$v" >> "$GITHUB_OUTPUT"
+            echo "label=$v" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0" >> "$GITHUB_OUTPUT"
+            echo "label=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+  macos:
+    needs: version
+    runs-on: macos-latest
+    env:
+      # Sans cela, clang vise la version du runner et l'app refuserait de se
+      # lancer sur un macOS plus ancien que lui. 14.4, comme LSMinimumSystemVersion
+      # (.justfile) : menuet appelle NSMenuItem.subtitle, apparu en 14.4, en ne
+      # le gardant que par un test « 14.0 » — en dessous, l'app planterait.
+      MACOSX_DEPLOYMENT_TARGET: "14.4"
+      LABEL: ${{ needs.version.outputs.label }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: raynmea/go.mod
+          cache-dependency-path: raynmea/go.sum
+      - uses: extractions/setup-just@v3
+
+      - name: raynmea.app (arm64)
+        run: just app_version=${{ needs.version.outputs.version }} app
+
+      # Le runner est Apple Silicon. menuet passe par cgo : la tranche Intel se
+      # compile avec un clang qui vise x86_64, puis lipo réunit les deux. La
+      # fusion invalide la signature ad hoc de `just app`, d'où la nouvelle.
+      - name: binaire universel (arm64 + x86_64)
+        run: |
+          exe=raynmea.app/Contents/MacOS/raynmea-menu
+          CGO_ENABLED=1 GOARCH=amd64 CC="clang -arch x86_64" \
+            go build -o "$RUNNER_TEMP/raynmea-menu-amd64" ./cmd/raynmea-menu
+          lipo -create "$exe" "$RUNNER_TEMP/raynmea-menu-amd64" -output "$RUNNER_TEMP/raynmea-menu"
+          mv "$RUNNER_TEMP/raynmea-menu" "$exe"
+          codesign --force --sign - --options runtime --timestamp=none raynmea.app
+          lipo -info "$exe"
+          codesign --verify --deep --strict raynmea.app
+
+      # ditto, et non zip : il garde la signature et les attributs du bundle.
+      - name: archive
+        run: |
+          mkdir -p ../dist
+          ditto -c -k --keepParent raynmea.app "../dist/raynmea-$LABEL-macos.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.zip
+          if-no-files-found: error
+
+  windows:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      LABEL: ${{ needs.version.outputs.label }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: raynmea/go.mod
+          cache-dependency-path: raynmea/go.sum
+      - uses: extractions/setup-just@v3
+
+      # Pas de cgo côté Windows : la compilation croisée depuis Linux suffit.
+      # Icônes, manifeste et version viennent des .syso committés (la version
+      # qu'affichent les propriétés du .exe est donc celle de `just icons`).
+      - name: raynmea-menu-*.exe
+        run: just win
+
+      # Un zip par architecture, et dedans un nom sans suffixe : c'est celui
+      # que la clé « Démarrer avec Windows » retiendra.
+      - name: archives
+        run: |
+          mkdir -p ../dist
+          for arch in amd64 arm64; do
+            d=$(mktemp -d)
+            cp raynmea-menu-$arch.exe "$d/raynmea-menu.exe"
+            (cd "$d" && zip -q "$GITHUB_WORKSPACE/dist/raynmea-$LABEL-windows-$arch.zip" raynmea-menu.exe)
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [version, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: release GitHub
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cat > notes.md <<'NOTES'
+          Les apps ne sont ni signées par un développeur identifié ni notarisées :
+
+          - **macOS** (14.4 ou plus récent, Apple Silicon et Intel) : au premier
+            lancement, Réglages Système → Confidentialité et sécurité →
+            « Ouvrir quand même », ou `xattr -dr com.apple.quarantine raynmea.app`.
+          - **Windows** (10 1903 ou plus récent) : à l'avertissement SmartScreen,
+            « Informations complémentaires » → « Exécuter quand même ».
+            `amd64` pour un PC Intel/AMD, `arm64` pour un PC ARM.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" dist/*.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "raynmea $VERSION" \
+            --notes-file notes.md --generate-notes

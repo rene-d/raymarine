@@ -1,0 +1,78 @@
+{
+  "RT_GROUP_ICON": {
+    "APP": {
+      "0000": [
+        "app-256.png",
+        "app-64.png",
+        "app-48.png",
+        "app-40.png",
+        "app-32.png",
+        "app-24.png",
+        "app-20.png",
+        "app-16.png"
+      ]
+    },
+    "OFF": {
+      "0000": [
+        "off-64.png",
+        "off-48.png",
+        "off-40.png",
+        "off-32.png",
+        "off-24.png",
+        "off-20.png",
+        "off-16.png"
+      ]
+    }
+  },
+  "RT_MANIFEST": {
+    "#1": {
+      "0409": {
+        "identity": {
+          "name": "local.raynmea.menu",
+          "version": "1.0.0.0"
+        },
+        "description": "raynmea — passerelle RayDB → NMEA 0183",
+        "minimum-os": "win10",
+        "execution-level": "as invoker",
+        "ui-access": false,
+        "auto-elevate": false,
+        "dpi-awareness": "per monitor v2",
+        "disable-theming": false,
+        "disable-window-filtering": false,
+        "high-resolution-scrolling-aware": false,
+        "ultra-high-resolution-scrolling-aware": false,
+        "long-path-aware": true,
+        "printer-driver-isolation": false,
+        "gdi-scaling": false,
+        "segment-heap": false,
+        "use-common-controls-v6": true
+      }
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "1.0.0.0",
+          "product_version": "1.0.0.0"
+        },
+        "info": {
+          "040C": {
+            "Comments": "",
+            "CompanyName": "",
+            "FileDescription": "raynmea — passerelle RayDB → NMEA 0183",
+            "FileVersion": "1.0",
+            "InternalName": "raynmea-menu",
+            "LegalCopyright": "",
+            "LegalTrademarks": "",
+            "OriginalFilename": "raynmea-menu.exe",
+            "PrivateBuild": "",
+            "ProductName": "raynmea",
+            "ProductVersion": "1.0",
+            "SpecialBuild": ""
+          }
+        }
+      }
+    }
+  }
+}

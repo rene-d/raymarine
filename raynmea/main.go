@@ -41,7 +41,7 @@ import (
 	"syscall"
 	"time"
 
-	"raynmea/internal/gateway"
+	"github.com/rene-d/raymarine/raynmea/internal/gateway"
 )
 
 // multiFlag : une option répétable (-udp-to, -path).

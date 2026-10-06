@@ -41,6 +41,8 @@ type event struct {
 	note string
 	// link : changement d'état de la liaison, plutôt qu'une valeur ou une note.
 	link *Link
+	// discovery : changement de moyen de découverte (cf. Discovery).
+	discovery *Discovery
 	// quiet : note qui ne vaut que dans le fil, et ne doit pas prendre l'en-tête
 	// de la TUI — l'état de la connexion y est plus utile qu'un chemin souscrit
 	// une fois pour toutes.

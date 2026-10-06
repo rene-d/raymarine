@@ -1,4 +1,4 @@
-//go:build !darwin
+//go:build !darwin && !windows
 
 // La barre de menus est celle de macOS : ailleurs, cette commande ne fait que
 // le dire. Elle existe pour que `go build ./...` et `go vet ./...` passent sur

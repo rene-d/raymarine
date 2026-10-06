@@ -50,3 +50,6 @@ raynmea/raynmea-linux-*
 
 # L'app macOS de la barre de menus, assemblée par `just app`.
 raynmea/raynmea.app/
+
+# Les .exe de l'app Windows et de la ligne de commande (`just win`, `just win-cli`).
+raynmea/*.exe
