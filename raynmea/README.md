@@ -120,6 +120,8 @@ fond dans la barre, le bateau et le MFD en tête de menu, les valeurs de la TUI
 en dessous, et de quoi régler la diffusion sans repasser par la ligne de
 commande.
 
+<img src="raynmea-macos.png" width="462" alt="Le menu de raynmea.app : bateau et MFD en tête, SOG, COG, GPS, fond, vent vrai et apparent, puis la diffusion UDP, les destinations, le MFD et l'enregistrement">
+
 ```sh
 just app          # construit et signe raynmea.app
 just app-run      # ... et la lance
