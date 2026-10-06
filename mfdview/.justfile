@@ -87,8 +87,8 @@ ios sim=default_sim:
     cargo tauri ios dev "{{ sim }}"
 
 # Compile et lance sur un iPhone relié en USB (demande une signature).
-iphone:
-    cargo tauri ios dev --host
+iphone device="iPhone de René":
+    cargo tauri ios dev "{{device}}" --host
 
 # Archive signée, pour TestFlight ou une installation ad hoc.
 ios-build:
@@ -101,6 +101,11 @@ ios-install:
     rm -rf gen/apple/build/arm64-sim/MFDView.app
     cargo tauri ios build --debug --target aarch64-sim
     xcrun simctl install booted gen/apple/build/arm64-sim/MFDView.app
+
+# Installe sur l'iPhone une version autonome, lançable sans le Mac.
+iphone-install device="iPhone de René":
+    cargo tauri ios build --debug --target aarch64
+    xcrun devicectl device install app --device "{{device}}" gen/apple/build/arm64/MFDView.ipa
 
 # Régénère les icônes de toutes les plateformes depuis icons/icon.png.
 icons:

@@ -15,6 +15,12 @@
 
   Aucun entitlement multicast ici : c'est le démon Bonjour du système qui fait
   le multicast, l'application n'ouvre pas de socket 224.0.0.251.
+
+  UIApplicationSceneManifest : depuis le SDK iOS 27, UIKit arrête au lancement
+  (SIGTRAP) toute app qui n'adopte pas le cycle de vie par scènes. `tao` ne
+  passe en mode scène que si UIApplicationSupportsMultipleScenes est vrai ; il
+  fournit lui-même le délégué (TaoSceneDelegate). Sur iPhone, le système
+  n'ouvre de toute façon qu'une scène.
 -->
 <plist version="1.0">
 <dict>
@@ -25,5 +31,10 @@
     <string>_raydb._tcp</string>
     <string>_rym_rrc._tcp</string>
   </array>
+  <key>UIApplicationSceneManifest</key>
+  <dict>
+    <key>UIApplicationSupportsMultipleScenes</key>
+    <true/>
+  </dict>
 </dict>
 </plist>

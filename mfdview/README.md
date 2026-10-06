@@ -88,10 +88,15 @@ just install      # l'app compilée, dans ~/Applications (`just install map` ave
 just mfd          # un MFD simulé, dans un autre terminal
 just ios          # compile et lance sur le simulateur iPhone
 just iphone       # sur un iPhone relié en USB
+just iphone-install  # version autonome sur l'iPhone, lançable sans le Mac
 just check        # compile-vérifie les trois cibles Apple
 just logs / shot  # journaux et capture d'écran du simulateur
 just setup        # l'outillage iOS, si la machine est neuve
 ```
+
+Les recettes qui signent pour un vrai iPhone (`iphone`, `iphone-install`,
+`ios-build`) lisent l'équipe de développement dans `APPLE_DEVELOPMENT_TEAM` —
+sans elle, Xcode refuse de signer. Voir « Mettre l'app sur un iPhone ».
 
 ## Lancer
 
@@ -304,12 +309,13 @@ l'erreur 1430 plus haut).
 
 3. **Ensuite, tout se fait en ligne de commande** :
 
-       export TAURI_APPLE_DEVELOPMENT_TEAM=XXXXXXXXXX
-       cargo tauri ios build --debug --target aarch64
-       xcrun devicectl device install app --device "iPhone de René" <chemin affiché>
+       export APPLE_DEVELOPMENT_TEAM=XXXXXXXXXX     # fish : set -Ux APPLE_DEVELOPMENT_TEAM …
+       just iphone-install "iPhone de René"
 
-   La CLI imprime le chemin du bundle en fin de build (« Finished 1 iOS Bundle
-   at: … »), et `xcrun devicectl list devices` donne le nom exact du téléphone.
+   La recette enchaîne `cargo tauri ios build --debug --target aarch64` et
+   `xcrun devicectl device install app`. `xcrun devicectl list devices` donne
+   le nom exact du téléphone. L'équipe reste hors de `tauri.conf.json` : elle
+   est propre à chacun, et Xcode refuserait celle d'un autre.
 
 4. **Sur l'iPhone, la première fois** : Réglages → Général → VPN et gestion de
    l'appareil → faire confiance au développeur. Puis, au lancement, accepter
